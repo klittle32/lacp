@@ -116,4 +116,22 @@ describe("effort", () => {
       })
       assert.deepStrictEqual(reply.result.configOptions.map((o: any) => o.id), ["model", "mode"])
     }))
+
+  it.live("retries a failed model listing for the next session", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const failures = yield* Ref.make(1)
+      yield* fake.on("list_models", () =>
+        Ref.modify(failures, (n) => [n, n - 1]).pipe(
+          Effect.map((n) =>
+            n > 0 ? { success: false, error: "warming up" } : { success: true, entries: Fake.MODEL_ENTRIES }
+          )
+        ))
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const first = yield* client.request("session/new", { cwd: "/work" })
+      assert.isUndefined(option(first.result.configOptions, "effort"))
+      const second = yield* client.request("session/new", { cwd: "/work" })
+      assert.isDefined(option(second.result.configOptions, "effort"))
+    }))
 })

@@ -26,6 +26,18 @@ describe("ACP v1 projection", () => {
     assert.deepStrictEqual(second, [{ sessionUpdate: "tool_call_update", toolCallId: "t", status: "failed" }])
   })
 
+  it("keeps each session's tool calls apart and forgets them when its turn ends", () => {
+    const p = ProjectV1.makeProjector({ notices: false })
+    const call = (session: string) =>
+      p.project(session, { _tag: "ToolCall", patch: { toolCallId: "t", name: "Read" } })[0]?.sessionUpdate
+    assert.strictEqual(call("a"), "tool_call")
+    assert.strictEqual(call("b"), "tool_call")
+    p.project("a", { _tag: "State", state: "idle", stopReason: "end_turn" })
+    // Session b's turn is still running; session a starts over.
+    assert.strictEqual(call("b"), "tool_call_update")
+    assert.strictEqual(call("a"), "tool_call")
+  })
+
   it("drops state updates and live user echoes, and gates notices", () => {
     const p = ProjectV1.makeProjector({ notices: false })
     assert.deepStrictEqual(p.project("s", { _tag: "State", state: "running" }), [])

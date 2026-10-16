@@ -10,7 +10,6 @@
 import {
   Context,
   Deferred,
-  Duration,
   Effect,
   Equal,
   Exit,
@@ -171,6 +170,7 @@ const BUILTIN_COMMANDS: Readonly<Record<string, string>> = {
 
 const decode = <S extends Schema.Codec<unknown, unknown>>(schema: S) => Schema.decodeUnknownOption(schema)
 const decodeStreamDelta = decode(StreamDelta)
+const decodeDeltaRun = decode(Schema.Struct({ run_id: Schema.String }))
 const decodeTurnFinished = decode(TurnFinished)
 const decodeControlRequest = decode(ControlRequest)
 const decodeLoopStatus = decode(LoopStatus)
@@ -220,6 +220,8 @@ interface Turn {
   started: boolean
   error: Option.Option<string>
   readonly done: Deferred.Deferred<TurnResult>
+  /** Letta runs seen in this turn's stream, so a turn ended locally can disown them. */
+  readonly runs: Set<string>
 }
 
 interface Attachment {
@@ -247,6 +249,10 @@ interface Session {
   commands: ReadonlyArray<Command>
   models: ReadonlyArray<Models.ModelChoice>
   readonly ownMessages: Set<string>
+  /** Runs of turns lacp ended itself; their late frames are ignored. */
+  readonly abandonedRuns: Set<string>
+  /** The client's MCP servers this session was opened with. */
+  readonly mcpServers: ReadonlyArray<McpServerConfig>
   turn: Option.Option<Turn>
   foreground: "idle" | "running" | "requires_action"
   readonly deviceStatus: Deferred.Deferred<void>
@@ -390,9 +396,9 @@ export class Agent extends Context.Service<Agent, {
           const entries = connection.call((request_id) => ({ type: "list_models", request_id }), ListModelsResponse, {
             timeout: "15 seconds"
           }).pipe(
-            Effect.map((response) => response.entries),
+            Effect.map((response) => Option.some(response.entries)),
             Effect.catch((error) =>
-              Effect.logWarning(`Could not list Letta models: ${error.message}`).pipe(Effect.as([]))
+              Effect.logWarning(`Could not list Letta models: ${error.message}`).pipe(Effect.as(Option.none()))
             )
           )
           const levels = appServer.cli(["model", "list"]).pipe(
@@ -404,8 +410,12 @@ export class Agent extends Context.Service<Agent, {
             )
           )
           return Effect.all([entries, levels], { concurrency: "unbounded" }).pipe(
-            Effect.map(([e, rows]) => Models.catalog(e, rows)),
-            Effect.tap((choices) => Effect.sync(() => modelsByGeneration.set(connection.generation, choices)))
+            Effect.map(([listed, rows]) => {
+              const choices = Models.catalog(Option.getOrElse(listed, () => []), rows)
+              // A failed listing is retried by the next session instead of being cached.
+              if (Option.isSome(listed)) modelsByGeneration.set(connection.generation, choices)
+              return choices
+            })
           )
         })
 
@@ -451,6 +461,8 @@ export class Agent extends Context.Service<Agent, {
 
       const onTurnFinished = (session: Session, frame: TurnFinished) =>
         Effect.gen(function*() {
+          // The late end of a turn lacp ended itself must not end the next one.
+          if (frame.run_id != null && session.abandonedRuns.has(frame.run_id)) return
           const turn = session.turn
           if (Option.isSome(turn) && !turn.value.accepted) {
             turn.value.early = Option.some(frame)
@@ -521,6 +533,10 @@ export class Agent extends Context.Service<Agent, {
         Effect.gen(function*() {
           // Subagent streams are summarised by their parent tool call.
           if (frame.subagent_id !== undefined && frame.subagent_id !== null) return
+          const run = Option.map(decodeDeltaRun(frame.delta), (d) => d.run_id)
+          // Output of a turn lacp already ended (a cancel Letta never confirmed) is dropped.
+          if (Option.isSome(run) && session.abandonedRuns.has(run.value)) return
+          if (Option.isSome(run) && Option.isSome(session.turn)) session.turn.value.runs.add(run.value)
           for (const item of session.translator.delta(frame.delta)) {
             switch (item._tag) {
               case "UserEcho": {
@@ -800,6 +816,7 @@ export class Agent extends Context.Service<Agent, {
         conn: LettaConnection,
         scope: Scope.Closeable,
         mcp: Bridge.McpBridge,
+        mcpServers: ReadonlyArray<McpServerConfig>,
         agentId: string,
         cwd: string,
         started: Effect.Success<ReturnType<typeof startRuntime>>
@@ -831,6 +848,8 @@ export class Agent extends Context.Service<Agent, {
           commands: [],
           models: yield* models(conn),
           ownMessages: new Set(),
+          abandonedRuns: new Set(),
+          mcpServers,
           turn: Option.none(),
           foreground: "idle",
           deviceStatus: yield* Deferred.make<void>(),
@@ -1109,7 +1128,7 @@ export class Agent extends Context.Service<Agent, {
             cwd: input.cwd,
             tools: yield* mcp.tools
           })
-          const session = yield* makeSession(conn, scope, mcp, agentId, input.cwd, started)
+          const session = yield* makeSession(conn, scope, mcp, input.mcpServers, agentId, input.cwd, started)
           yield* attach(session, started, conn)
           const attachment = Option.getOrThrow(session.attachment)
           yield* settle(session, attachment)
@@ -1129,10 +1148,14 @@ export class Agent extends Context.Service<Agent, {
         readonly replay: boolean
         readonly mcpServers: ReadonlyArray<McpServerConfig>
       }) {
-        const existing = sessions.get(input.sessionId)
+        const open = sessions.get(input.sessionId)
+        // A session reopened from another directory or with other MCP servers gets a new runtime.
+        const existing = open !== undefined && open.cwd === input.cwd && Equal.equals(open.mcpServers, input.mcpServers)
+          ? open
+          : undefined
+        if (open !== undefined && existing === undefined) yield* closeSession(open.id)
         if (existing !== undefined) {
           const conn = yield* connection
-          existing.cwd = input.cwd
           yield* ensureAttached(existing)
           if (input.replay) yield* replay(existing, conn)
           yield* announce(existing)
@@ -1157,7 +1180,7 @@ export class Agent extends Context.Service<Agent, {
             cwd: input.cwd,
             tools: yield* mcp.tools
           })
-          const session = yield* makeSession(conn, scope, mcp, agentId, input.cwd, started)
+          const session = yield* makeSession(conn, scope, mcp, input.mcpServers, agentId, input.cwd, started)
           if (input.replay) yield* replay(session, conn)
           yield* attach(session, started, conn)
           yield* settle(session, Option.getOrThrow(session.attachment))
@@ -1240,11 +1263,14 @@ export class Agent extends Context.Service<Agent, {
           early: Option.none(),
           started: true,
           error: Option.none(),
-          done
+          done,
+          runs: new Set()
         })
         session.localCommand = true
         yield* emit(session, { _tag: "UserMessage", messageId, content: prompt })
         yield* setForeground(session, "running")
+        // The lock follows the turn, not the call: a cancelled command must not hold up the next prompt.
+        yield* Deferred.await(done).pipe(Effect.ensuring(release), Effect.forkIn(session.scope))
         yield* Effect.gen(function*() {
           const result = yield* attachment.connection.call(
             (request_id) => ({
@@ -1257,6 +1283,8 @@ export class Agent extends Context.Service<Agent, {
             ExecuteCommandResponse,
             { timeout: "10 minutes" }
           ).pipe(Effect.result)
+          // A command that outlived its (cancelled) turn has nothing left to report.
+          if (!Option.exists(session.turn, (t) => t.clientMessageId === messageId)) return
           const output = result._tag === "Success" ? result.success.output ?? "" : result.failure.message
           if (output !== "") {
             yield* emit(session, { _tag: "AgentMessageChunk", messageId: yield* uuid, content: Content.text(output) })
@@ -1267,13 +1295,15 @@ export class Agent extends Context.Service<Agent, {
               ? { stopReason: "end_turn", error: Option.none() }
               : { stopReason: "error", error: Option.some({ code: -32603, message: output }) }
           )
-        }).pipe(Effect.ensuring(release), Effect.forkIn(session.scope))
+        }).pipe(Effect.forkIn(session.scope))
         return { messageId, completion: Deferred.await(done) } satisfies PromptHandle
       })
 
       const prompt = Effect.fn("Agent.prompt")(function*(sessionId: string, blocks: ReadonlyArray<ContentBlock>) {
         const session = yield* getSession(sessionId)
-        yield* Semaphore.take(session.turnLock, 1)
+        // Waiting for the previous turn stays interruptible even where the caller makes
+        // inserting the prompt uninterruptible (the v2 receipt).
+        yield* Effect.interruptible(Semaphore.take(session.turnLock, 1))
         const release = Semaphore.release(session.turnLock, 1).pipe(Effect.asVoid)
         return yield* Effect.gen(function*() {
           const attachment = yield* ensureAttached(session)
@@ -1288,7 +1318,8 @@ export class Agent extends Context.Service<Agent, {
             early: Option.none(),
             started: false,
             error: Option.none(),
-            done
+            done,
+            runs: new Set()
           }
           session.turn = Option.some(turn)
           session.ownMessages.add(clientMessageId)
@@ -1349,11 +1380,13 @@ export class Agent extends Context.Service<Agent, {
           )
         }
         // If Letta never reports the end of the turn, end it ourselves.
-        yield* Effect.sleep(Duration.seconds(15)).pipe(
+        yield* Effect.sleep(config.cancelGrace).pipe(
           Effect.andThen(
             Effect.suspend(() =>
               Option.isSome(session.turn) && session.turn.value === turn
-                ? completeTurn(session, { stopReason: "cancelled", error: Option.none() })
+                ? Effect.sync(() => turn.runs.forEach((run) => session.abandonedRuns.add(run))).pipe(
+                  Effect.andThen(completeTurn(session, { stopReason: "cancelled", error: Option.none() }))
+                )
                 : Effect.void
             )
           ),

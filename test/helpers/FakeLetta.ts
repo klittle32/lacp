@@ -9,7 +9,8 @@ import type { Frame, LettaConnection, Reply } from "../../src/letta/AppServer.ts
 import { LettaRequestFailed } from "../../src/letta/Errors.ts"
 import { type Command, FrameHeader } from "../../src/letta/Protocol.ts"
 
-export type Handler = (command: Command) => unknown
+/** Answers a command: with a response, or with an Effect producing one (e.g. one that never ends). */
+export type Handler = (command: Command) => Effect.Effect<unknown> | Record<string, unknown>
 
 export interface FakeLetta {
   readonly connection: LettaConnection
@@ -191,7 +192,7 @@ export const make = Effect.gen(function*() {
     runtime_external_tools_update: () => ({ success: true })
   }
 
-  const respond = (command: Command): unknown => {
+  const respond = (command: Command): Effect.Effect<unknown> | Record<string, unknown> => {
     const handler = handlers.get(command.type) ?? defaults[command.type]
     return handler === undefined ? { success: false, error: `unhandled ${command.type}` } : handler(command)
   }
@@ -213,7 +214,8 @@ export const make = Effect.gen(function*() {
       Effect.gen(function*() {
         const command = make("req")
         yield* record(command)
-        const raw = respond(command)
+        const answer = respond(command)
+        const raw = Effect.isEffect(answer) ? yield* answer : answer
         // runtime_start replays state before responding (wait_for_replay).
         if (command.type === "runtime_start") {
           const started = raw as { runtime: { conversation_id: string } }

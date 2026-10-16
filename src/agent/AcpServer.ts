@@ -225,7 +225,8 @@ export class AcpServer extends Context.Service<AcpServer, {
             )),
         Method.handle(V2.Prompt, ({ prompt, sessionId }) =>
           // Once inserted, a v2 prompt must not be answered with an error, so the
-          // receipt is produced uninterruptibly.
+          // receipt is produced uninterruptibly. Waiting for the session's previous
+          // turn stays interruptible (see Agent.prompt), so it can be cancelled.
           rpc(agent.prompt(sessionId, prompt)).pipe(
             Effect.map((handle) => ({ messageId: handle.messageId })),
             Effect.uninterruptible

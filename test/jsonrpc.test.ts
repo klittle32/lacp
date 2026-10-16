@@ -142,4 +142,15 @@ describe("JsonRpcPeer", () => {
       const cancel = yield* receive
       assert.deepStrictEqual(cancel, { jsonrpc: "2.0", method: "$/cancel_request", params: { requestId: outgoing.id } })
     }))
+
+  it.live("fails requests at once after the connection is gone", () =>
+    Effect.gen(function*() {
+      const { input, peer } = yield* harness
+      const serving = yield* Effect.forkScoped(peer.serve(Method.router([])))
+      yield* Queue.end(input)
+      yield* Fiber.join(serving)
+      const error = yield* peer.request(Ask, { q: "anyone?" }).pipe(Effect.timeout("1 second"), Effect.flip)
+      assert.strictEqual(error._tag, "RpcError")
+      assert.include(error.message, "Connection closed")
+    }).pipe(Effect.scoped))
 })

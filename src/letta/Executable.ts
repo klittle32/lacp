@@ -13,7 +13,7 @@
  * `letta.js`), lacp runs that script with the runtime that can see the user's
  * login: see `LettaRuntime` and `Login.ts`.
  */
-import { Context, type Duration, Effect, FileSystem, Layer, Option, Path, Result } from "effect"
+import { Context, Duration, Effect, Exit, FileSystem, Layer, Option, Path, Result } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { LacpConfig, type LettaRuntime } from "../Config.ts"
 import { Host } from "../Host.ts"
@@ -33,6 +33,8 @@ export interface LettaInstall {
   readonly path: string
   /** How it was found. */
   readonly source: string
+  /** Whether `command` needs a shell to start (Windows `.cmd` launchers). */
+  readonly shell: boolean
   /** What runs Letta Code: Node or Bun (with its `letta.js`), or the found executable as it is. */
   readonly runtime: "node" | "bun" | "launcher"
   /** Why, for diagnostics. */
@@ -128,12 +130,14 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
           Effect.orElseSucceed(() => false)
         )
 
+      const needsShell = (command: string) => windows && command.toLowerCase().endsWith(".cmd")
+
       const run = (command: string, args: ReadonlyArray<string>, timeout: Duration.Input) =>
         spawner.string(
           ChildProcess.make(command, args, {
             env: { DISABLE_AUTOUPDATER: "1", LETTA_CODE_TELEM: "0" },
             extendEnv: true,
-            shell: windows && command.endsWith(".cmd"),
+            shell: needsShell(command),
             stdin: "ignore"
           }),
           { includeStderr: true }
@@ -248,6 +252,7 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
           const install: LettaInstall = {
             command: candidate.path,
             prefixArgs: [],
+            shell: needsShell(candidate.path),
             version: "unknown",
             path: candidate.path,
             source: candidate.source,
@@ -263,6 +268,7 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
         const install: LettaInstall = {
           command: choice.path,
           prefixArgs: [script.value],
+          shell: false,
           version: "unknown",
           path: candidate.path,
           source: candidate.source,
@@ -302,6 +308,25 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
         })))
       )
 
+      /** A bare executable name: looked up on PATH, then in the login shell. */
+      const configuredName = (name: string) => {
+        const files = windows ? [`${name}.cmd`, `${name}.exe`, name] : [name]
+        const onPath = pathDirs().flatMap((dir) =>
+          files.map((file): Candidate => ({ path: path.join(dir, file), source: "--letta-path" }))
+        )
+        return Effect.filter(onPath, (c) => isFile(c.path)).pipe(
+          Effect.filterOrElse(
+            (found) => found.length > 0,
+            () =>
+              loginShellLookup(name).pipe(
+                Effect.map((p) =>
+                  Option.toArray(Option.map(p, (at): Candidate => ({ path: at, source: "--letta-path" })))
+                )
+              )
+          )
+        )
+      }
+
       const resolve = Effect.gen(function*() {
         const searched: Array<string> = []
         const rejected: Array<string> = []
@@ -321,11 +346,20 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
         })
 
         // A bare name (e.g. `letta`) is looked up on PATH; anything else is a path.
-        const configured = Option.toArray(config.lettaPath).flatMap((p): Array<Candidate> =>
-          p.includes("/") || p.includes("\\")
-            ? [{ path: path.resolve(host.cwd, p), source: "--letta-path" }]
-            : pathCandidates().filter((c) => path.basename(c.path) === p).map((c) => ({ ...c, source: "--letta-path" }))
-        )
+        const configured = yield* Option.match(config.lettaPath, {
+          onNone: () => Effect.succeed<Array<Candidate>>([]),
+          onSome: (p) =>
+            p.includes("/") || p.includes("\\")
+              ? Effect.succeed([{ path: path.resolve(host.cwd, p), source: "--letta-path" }])
+              : configuredName(p)
+        })
+        if (Option.isSome(config.lettaPath) && configured.length === 0) {
+          return yield* new LettaUnsupported({
+            message:
+              `The configured Letta Code executable \`${config.lettaPath.value}\` was not found on PATH or in your login shell`,
+            command: config.lettaPath.value
+          })
+        }
         const explicit: Array<Candidate> = [
           ...configured,
           ...(host.env["LETTA_CLI_PATH"] ? [{ path: host.env["LETTA_CLI_PATH"], source: "LETTA_CLI_PATH" }] : [])
@@ -374,7 +408,13 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
         Effect.withSpan("LettaExecutable.resolve")
       )
 
-      return LettaExecutable.of({ resolve: yield* Effect.cached(resolve) })
+      // Only a found install is kept: after a failure (not installed yet, a slow first
+      // `--version`), the next connection attempt looks again.
+      const cached = yield* Effect.cachedWithTTL(
+        resolve,
+        (exit) => Exit.isSuccess(exit) ? Duration.infinity : Duration.zero
+      )
+      return LettaExecutable.of({ resolve: cached })
     })
   )
 

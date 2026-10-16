@@ -84,6 +84,31 @@ describe("LettaExecutable", () => {
     }).pipe(Effect.provide(NodeServices.layer)))
 })
 
+describe("LettaExecutable caching", () => {
+  it.live("looks again after a failed discovery, and keeps a found install", () =>
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      const path = yield* Path.Path
+      const dir = yield* fs.makeTempDirectoryScoped()
+      const bin = path.join(dir, "letta")
+      yield* Effect.gen(function*() {
+        const executable = yield* LettaExecutable
+        assert.strictEqual((yield* executable.resolve.pipe(Effect.flip))._tag, "LettaNotFound")
+        yield* fs.writeFileString(bin, `#!/bin/sh\necho "0.34.15 (Letta Code)"\n`)
+        yield* fs.chmod(bin, 0o755)
+        assert.strictEqual((yield* executable.resolve).path, bin)
+        // Once found, the install is not looked up again.
+        yield* fs.remove(bin)
+        assert.strictEqual((yield* executable.resolve).path, bin)
+      }).pipe(
+        Effect.provide(LettaExecutable.layer.pipe(
+          Layer.provide(LacpConfig.layerTest({})),
+          Layer.provide(Host.layerTest({ env: { PATH: dir }, home: "/nonexistent-home" }))
+        ))
+      )
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+})
+
 describe("LettaExecutable with a bare command name", () => {
   it.live("looks the configured name up on PATH", () =>
     Effect.gen(function*() {
@@ -91,6 +116,24 @@ describe("LettaExecutable with a bare command name", () => {
       const install = yield* resolveWith({ PATH: dir }, { lettaPath: Option.some("letta") })
       assert.strictEqual(install.path, bin)
       assert.strictEqual(install.source, "--letta-path")
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
+  it.live("finds other names on PATH too", () =>
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      const { bin, dir } = yield* fakeLetta("0.34.15")
+      const nightly = `${dir}/letta-nightly`
+      yield* fs.rename(bin, nightly)
+      const install = yield* resolveWith({ PATH: dir }, { lettaPath: Option.some("letta-nightly") })
+      assert.strictEqual(install.path, nightly)
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
+  it.live("fails instead of using another letta when the name is not found", () =>
+    Effect.gen(function*() {
+      const { dir } = yield* fakeLetta("0.34.15")
+      const error = yield* resolveWith({ PATH: dir }, { lettaPath: Option.some("letta-nightly") }).pipe(Effect.flip)
+      assert.strictEqual(error._tag, "LettaUnsupported")
+      assert.include(error.message, "letta-nightly")
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
 })
 

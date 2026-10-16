@@ -155,7 +155,7 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
               cwd: host.cwd,
               env: childEnv(),
               extendEnv: false,
-              shell: host.platform === "win32" && install.command.endsWith(".cmd"),
+              shell: install.shell,
               stdin: "ignore",
               stdout: "pipe",
               stderr: "pipe",
@@ -410,7 +410,7 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
               cwd: host.cwd,
               env: childEnv(),
               extendEnv: false,
-              shell: host.platform === "win32" && install.command.endsWith(".cmd"),
+              shell: install.shell,
               stdin: "ignore",
               stdout: "pipe",
               stderr: "pipe"

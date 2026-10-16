@@ -140,6 +140,7 @@ const configLayer = (input: Flags) =>
         lettaRuntime: input.lettaRuntime,
         appServerUrl: input.appServerUrl,
         maxAcpVersion: input.acpVersion === "1" ? 1 : 2,
+        cancelGrace: LacpConfig.defaults.cancelGrace,
         echoPrompts: input.echoPrompts,
         startupTimeout: Duration.seconds(input.startupTimeout)
       }
@@ -187,6 +188,7 @@ const setup = Command.make("setup", {}, () =>
     const code = yield* spawner.exitCode(
       ChildProcess.make(install.command, [...install.prefixArgs, "setup"], {
         extendEnv: true,
+        shell: install.shell,
         stdin: "inherit",
         stdout: "inherit",
         stderr: "inherit"

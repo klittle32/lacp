@@ -50,6 +50,8 @@ export interface LacpConfigShape {
   /** Connect to an already-running App Server instead of spawning one. */
   readonly appServerUrl: Option.Option<string>
   readonly maxAcpVersion: 1 | 2
+  /** How long a cancelled turn waits for Letta to report its end before lacp ends it. */
+  readonly cancelGrace: Duration.Duration
   /**
    * ACP v2: send each prompt back to the client as a `user_message`. Off by
    * default: T3 Code renders the echo as a second message, including the
@@ -70,6 +72,7 @@ export class LacpConfig extends Context.Service<LacpConfig, LacpConfigShape>()("
     lettaRuntime: "auto",
     appServerUrl: Option.none(),
     maxAcpVersion: 2,
+    cancelGrace: Duration.seconds(15),
     echoPrompts: false,
     startupTimeout: Duration.seconds(60)
   }

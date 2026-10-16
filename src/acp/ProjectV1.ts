@@ -60,14 +60,18 @@ interface TerminalState {
 
 export interface ProjectorV1 {
   readonly project: (sessionId: string, event: SessionEvent) => Updates
+  readonly toolCall: (sessionId: string, patch: ToolCallPatch) => V1.ToolCallUpdate
+}
+
+interface TurnProjector {
+  readonly project: (event: SessionEvent) => Updates
   readonly toolCall: (patch: ToolCallPatch) => V1.ToolCallUpdate
 }
 
-export const makeProjector = (features: ClientFeatures): ProjectorV1 => {
+/** Projects one session's turn: the tool calls it announced and the terminal output it has seen. */
+const makeTurnProjector = (features: ClientFeatures): TurnProjector => {
   const announced = new Set<string>()
   const terminals = new Map<string, TerminalState>()
-  /** The last mode reported per session (the initial one travels in the session response). */
-  const modes = new Map<string, string>()
 
   const renderTerminal = (id: string): V1.ToolCallContent => {
     const t = terminals.get(id)
@@ -176,22 +180,40 @@ export const makeProjector = (features: ClientFeatures): ProjectorV1 => {
         : []
   })
 
+  return { project, toolCall }
+}
+
+export const makeProjector = (features: ClientFeatures): ProjectorV1 => {
+  const turns = new Map<string, TurnProjector>()
+  /** The last mode reported per session (the initial one travels in the session response). */
+  const modes = new Map<string, string>()
+
+  const turnOf = (sessionId: string) => {
+    const existing = turns.get(sessionId)
+    if (existing !== undefined) return existing
+    const created = makeTurnProjector(features)
+    turns.set(sessionId, created)
+    return created
+  }
+
   return {
     project: (sessionId, event) => {
-      const updates = project(event)
+      const updates = turnOf(sessionId).project(event)
+      // Nothing refers back to a finished turn's tool calls, so its state is dropped.
+      if (event._tag === "State" && event.state === "idle") turns.delete(sessionId)
       if (event._tag !== "ConfigOptions") return updates
       const mode = event.options.find((o) => o.category === "mode")?.currentValue
       if (mode === undefined || modes.get(sessionId) === mode) return updates
       modes.set(sessionId, mode)
       return [...updates, { sessionUpdate: "current_mode_update", currentModeId: mode }]
     },
-    toolCall
+    toolCall: (sessionId, patch) => turnOf(sessionId).toolCall(patch)
   }
 }
 
 /** `session/request_permission` params for v1. */
 export const permissionParams = (projector: ProjectorV1, sessionId: string, request: PermissionRequest) => ({
   sessionId,
-  toolCall: projector.toolCall(request.toolCall),
+  toolCall: projector.toolCall(sessionId, request.toolCall),
   options: request.options.map((o) => ({ optionId: o.optionId, name: o.name, kind: o.kind }))
 })

@@ -89,6 +89,8 @@ export const makePeer = (options: PeerOptions = {}): Effect.Effect<PeerShape, ne
     const pending = new Map<string, Deferred.Deferred<unknown, RpcError>>()
     /** Incoming requests in flight, with the signal that cancels them. */
     const inflight = new Map<string, Deferred.Deferred<void>>()
+    /** Fails once the connection is gone, so that later requests fail at once instead of timing out. */
+    const closed = yield* Deferred.make<never, RpcError>()
     let nextId = 0
 
     const encodeLine = Schema.encodeEffect(OutgoingJson)
@@ -226,11 +228,18 @@ export const makePeer = (options: PeerOptions = {}): Effect.Effect<PeerShape, ne
         })
       )
 
-    const closePending = Effect.forEach(
-      Array.from(pending.values()),
-      (deferred) => Deferred.fail(deferred, RpcError.internal("Connection closed")),
-      { discard: true }
-    ).pipe(Effect.ensuring(Effect.sync(() => pending.clear())))
+    const closePending = Deferred.fail(closed, RpcError.internal("Connection closed")).pipe(
+      Effect.andThen(
+        Effect.forEach(
+          Array.from(pending.values()),
+          (deferred) => Deferred.fail(deferred, RpcError.internal("Connection closed")),
+          {
+            discard: true
+          }
+        )
+      ),
+      Effect.ensuring(Effect.sync(() => pending.clear()))
+    )
 
     yield* Effect.addFinalizer(() => closePending)
 
@@ -253,7 +262,7 @@ export const makePeer = (options: PeerOptions = {}): Effect.Effect<PeerShape, ne
           const deferred = yield* Deferred.make<unknown, RpcError>()
           pending.set(key, deferred)
           const raw = yield* write({ jsonrpc: "2.0", id, method: method.name, params: encoded }).pipe(
-            Effect.andThen(Deferred.await(deferred)),
+            Effect.andThen(Effect.raceFirst(Deferred.await(deferred), Deferred.await(closed))),
             Effect.timeoutOrElse({
               duration: requestOptions?.timeout ?? Duration.infinity,
               orElse: () =>
