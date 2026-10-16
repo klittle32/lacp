@@ -63,6 +63,7 @@ Letta agent to talk to. Everything can be set through environment variables in y
 | Letta Code runtime    | `LACP_LETTA_RUNTIME`   | `--letta-runtime`   | `auto` (default), `node` or `bun`: what runs Letta Code. See [Node or Bun](#node-or-bun)                                                                                  |
 | Existing App Server   | `LACP_APP_SERVER_URL`  | `--app-server-url`  | Connect to a running `letta server --listen ws://…` instead of starting one                                                                                               |
 | ACP version           | `LACP_ACP_VERSION`     | `--acp-version`     | `2` (default: negotiate v1 or v2) or `1` (never negotiate the v2 draft)                                                                                                   |
+| Echo prompts          | `LACP_ECHO_PROMPTS`    | `--echo-prompts`    | `false` (default) or `true`. ACP v2 only: send each prompt back to the client as a `user_message`                                                                         |
 | Startup timeout       | `LACP_STARTUP_TIMEOUT` | `--startup-timeout` | Seconds to wait for the App Server (default `60`)                                                                                                                         |
 | Log level             | `LACP_LOG_LEVEL`       | `--log-level`       | `debug`, `info` (default), `warn`, … Logs go to stderr                                                                                                                    |
 
@@ -120,7 +121,9 @@ Open the Agent Panel, click **+**, and choose **Letta Code**. If Zed cannot find
 - Environment: `LACP_AUTH=cloud-oauth` and `LETTA_AGENT_ID=agent-…` (or `LACP_AUTH=api-key` with `LETTA_API_KEY`)
 
 T3 Code nightly speaks the ACP v2 draft, so `lacp` negotiates v2 with it: turns end with `state_update`, shell
-commands appear as terminals, and edits arrive as git patches.
+commands appear as terminals, and edits arrive as git patches. Prompts are not echoed back (`LACP_ECHO_PROMPTS`):
+T3 Code cannot match an echo to the message it already shows, so it would display a second copy, including the
+instructions T3 adds to your prompts.
 
 ### Other ACP clients
 

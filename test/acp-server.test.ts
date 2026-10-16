@@ -408,15 +408,29 @@ describe("ACP v2 sessions", () => {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* setup(fake)
       const reply = yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
-      const messageId = reply.result.messageId as string
-      assert.isString(messageId)
-      const echo = yield* client.update((u) => u.sessionUpdate === "user_message")
-      assert.strictEqual(echo.messageId, messageId)
+      assert.isString(reply.result.messageId)
       yield* client.update((u) => u.sessionUpdate === "state_update" && u.state === "running")
       yield* fake.emit(Fake.delta(sessionId, { message_type: "assistant_message", id: "a", otid: "o", content: "hi" }))
       yield* fake.emit(Fake.turnFinished(sessionId))
       const idle = yield* client.update((u) => u.sessionUpdate === "state_update" && u.state === "idle")
       assert.deepStrictEqual(idle, { sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" })
+      // Prompts are not echoed by default: T3 Code would show the echo as a second message.
+      assert.notInclude((yield* client.updates).map((u) => u.sessionUpdate), "user_message")
+    }))
+
+  it.live("echoes prompts as user_message with --echo-prompts", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const client = yield* start(fake, { echoPrompts: true })
+      yield* client.request("initialize", initializeHybrid)
+      const created = yield* client.request("session/new", { cwd: "/work" })
+      const reply = yield* client.request("session/prompt", {
+        sessionId: created.result.sessionId,
+        prompt: text("hello")
+      })
+      const echo = yield* client.update((u) => u.sessionUpdate === "user_message")
+      assert.strictEqual(echo.messageId, reply.result.messageId)
+      assert.deepStrictEqual(echo.content, text("hello"))
     }))
 
   it.live("reports errors after insertion as idle with stopReason error", () =>

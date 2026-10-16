@@ -93,6 +93,14 @@ const flags = {
     Flag.withFallbackConfig(Config.Literals(ACP_VERSIONS, "LACP_ACP_VERSION")),
     Flag.withDefault<"1" | "2">("2")
   ),
+  echoPrompts: Flag.Boolean("echo-prompts").pipe(
+    Flag.withDescription(
+      "ACP v2: send each prompt back to the client as a user_message (T3 Code shows it as a second message). " +
+        "Env: LACP_ECHO_PROMPTS"
+    ),
+    Flag.withFallbackConfig(Config.Boolean("LACP_ECHO_PROMPTS")),
+    Flag.withDefault(false)
+  ),
   startupTimeout: Flag.Int("startup-timeout").pipe(
     Flag.withDescription("Seconds to wait for the Letta Code App Server to start. Env: LACP_STARTUP_TIMEOUT"),
     Flag.withFallbackConfig(Config.Int("LACP_STARTUP_TIMEOUT")),
@@ -109,6 +117,7 @@ type Flags = {
   readonly lettaRuntime: LettaRuntime
   readonly appServerUrl: Option.Option<string>
   readonly acpVersion: "1" | "2"
+  readonly echoPrompts: boolean
   readonly startupTimeout: number
 }
 
@@ -131,6 +140,7 @@ const configLayer = (input: Flags) =>
         lettaRuntime: input.lettaRuntime,
         appServerUrl: input.appServerUrl,
         maxAcpVersion: input.acpVersion === "1" ? 1 : 2,
+        echoPrompts: input.echoPrompts,
         startupTimeout: Duration.seconds(input.startupTimeout)
       }
       return LacpConfig.of(config)

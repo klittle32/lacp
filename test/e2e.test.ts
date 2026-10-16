@@ -24,6 +24,7 @@ const hasBun = spawnSync("bun", ["--version"]).status === 0
 
 const realLetta = LettaAppServer.layer.pipe(Layer.provide(LettaExecutable.layer), Layer.provide(layerWebSocket))
 
+// The v2 cases anchor on each prompt's echoed `user_message`, so they turn the echo on.
 const startReal = (lettaRuntime: LettaRuntime = "node") =>
   Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
@@ -35,6 +36,7 @@ const startReal = (lettaRuntime: LettaRuntime = "node") =>
         auth: "local",
         lettaPath: Option.fromUndefinedOr(letta),
         lettaRuntime,
+        echoPrompts: true,
         permissionMode: Option.some("standard")
       },
       host: {

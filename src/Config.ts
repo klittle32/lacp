@@ -50,6 +50,12 @@ export interface LacpConfigShape {
   /** Connect to an already-running App Server instead of spawning one. */
   readonly appServerUrl: Option.Option<string>
   readonly maxAcpVersion: 1 | 2
+  /**
+   * ACP v2: send each prompt back to the client as a `user_message`. Off by
+   * default: T3 Code renders the echo as a second message, including the
+   * instructions it adds to prompts.
+   */
+  readonly echoPrompts: boolean
   readonly startupTimeout: Duration.Duration
 }
 
@@ -64,6 +70,7 @@ export class LacpConfig extends Context.Service<LacpConfig, LacpConfigShape>()("
     lettaRuntime: "auto",
     appServerUrl: Option.none(),
     maxAcpVersion: 2,
+    echoPrompts: false,
     startupTimeout: Duration.seconds(60)
   }
 

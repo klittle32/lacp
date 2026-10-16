@@ -9,6 +9,7 @@ import * as ProjectV1 from "../acp/ProjectV1.ts"
 import * as ProjectV2 from "../acp/ProjectV2.ts"
 import * as V1 from "../acp/V1.ts"
 import * as V2 from "../acp/V2.ts"
+import { LacpConfig } from "../Config.ts"
 import type { PermissionDecision, PermissionRequest, SessionEvent } from "../domain/Events.ts"
 import { JsonRpcPeer } from "../jsonrpc/Peer.ts"
 
@@ -18,7 +19,7 @@ export type Surface =
 
 type Selected =
   | { readonly version: 1; readonly projector: ProjectV1.ProjectorV1 }
-  | { readonly version: 2 }
+  | { readonly version: 2; readonly projector: ProjectV2.ProjectorV2 }
 
 export class AcpClient extends Context.Service<AcpClient, {
   /** Fixes the protocol surface after `initialize`. */
@@ -32,6 +33,7 @@ export class AcpClient extends Context.Service<AcpClient, {
     AcpClient,
     Effect.gen(function*() {
       const peer = yield* JsonRpcPeer
+      const config = yield* LacpConfig
       const selected = yield* Ref.make(Option.none<Selected>())
 
       const decision = (outcome: { readonly outcome: string; readonly optionId?: string }): PermissionDecision =>
@@ -49,7 +51,7 @@ export class AcpClient extends Context.Service<AcpClient, {
                   version: 1,
                   projector: ProjectV1.makeProjector({ notices: surface.capabilities.session?.notices != null })
                 }
-                : { version: 2 }
+                : { version: 2, projector: ProjectV2.makeProjector({ echoPrompts: config.echoPrompts }) }
             )
           ),
         version: Ref.get(selected).pipe(Effect.map(Option.map((s) => s.version))),
@@ -61,7 +63,7 @@ export class AcpClient extends Context.Service<AcpClient, {
               yield* peer.notify(V1.Update, { sessionId, update })
             }
           } else {
-            for (const update of ProjectV2.project(event)) {
+            for (const update of surface.value.projector.project(event)) {
               yield* peer.notify(V2.Update, { sessionId, update })
             }
           }

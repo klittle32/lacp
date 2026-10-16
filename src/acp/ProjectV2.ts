@@ -137,6 +137,15 @@ export const project = SessionEvent.match({
   }]
 })
 
+export interface ProjectorV2 {
+  readonly project: (event: SessionEvent) => Updates
+}
+
+/** Projects events for one connection; without `echoPrompts`, prompts are not sent back as `user_message`. */
+export const makeProjector = (features: { readonly echoPrompts: boolean }): ProjectorV2 => ({
+  project: (event) => event._tag === "UserMessage" && !features.echoPrompts ? [] : project(event)
+})
+
 /** `session/request_permission` params for v2. */
 export const permissionParams = (sessionId: string, request: PermissionRequest) => ({
   sessionId,
