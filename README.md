@@ -67,7 +67,7 @@ Letta agent to talk to. Everything can be set through environment variables in y
 | Echo prompts          | `LACP_ECHO_PROMPTS`        | `--echo-prompts`           | `false` (default) or `true`. ACP v2 only: send each prompt back to the client as a `user_message`                                                                         |
 | Wait for background   | `LACP_WAIT_FOR_BACKGROUND` | `--no-wait-for-background` | `true` (default) or `false`: keep a turn open until the background subagents it started report back. See below                                                            |
 | Startup timeout       | `LACP_STARTUP_TIMEOUT`     | `--startup-timeout`        | Seconds to wait for the App Server (default `60`)                                                                                                                         |
-| Log level             | `LACP_LOG_LEVEL`           | `--log-level`              | `debug`, `info` (default), `warn`, … Logs go to stderr                                                                                                                    |
+| Log level             | `LACP_LOG_LEVEL`           | `--log-level`              | `debug`, `info` (default), `warn`, … (any case). `trace` also logs every App Server frame. Logs go to stderr                                                              |
 
 Self-hosted Letta servers work through Letta Code's own `LETTA_BASE_URL` setting.
 
@@ -165,6 +165,7 @@ ACP client ──stdio, JSON-RPC (ACP v1 or v2)──▶ lacp ──WebSocket─
   Letta runs on its own. Clients like T3 Code only show turns they started, so `lacp` keeps a turn open until the
   background subagents it started have reported back, and their report appears in it. Meanwhile the client shows
   the turn as working; stopping it ends the wait (the subagent carries on, but its report is then not shown in T3).
+  T3 Code holds back the end of a reply that is still streaming, so the report shows in full when the turn ends.
   Letta's silent subagents (reflection, memory), background shell commands and subagents started before the prompt
   do not hold a turn open. Letta's `<task-notification>` messages are not shown as if you had typed them.
 - MCP servers the editor offers in `session/new` (for example T3 Code's per-session server) are connected by

@@ -201,6 +201,24 @@ describe("Translator", () => {
       )
     }))
 
+  it.effect("reports which background subagents a delivered task notification covers", () =>
+    Effect.gen(function*() {
+      const t = yield* make
+      // As Letta Code 0.34.15 delivers a subagent's report.
+      const subagent = "<task-notification>\n<task-id>task_1</task-id>\n<status>completed</status>\n" +
+        "<summary>Agent \"List directory\" completed</summary>\n<result>subagent_type=general-purpose " +
+        "subagent_id=subagent-1792186857398-1 subagent_status=success agent_id=agent-local-6fd4 " +
+        "conversation_id=default\n\na.txt b.txt</result>\n</task-notification>\n" +
+        "Full transcript available at: /tmp/task_1.log"
+      const shell = "<task-notification>\n<task-id>bash_2</task-id>\n<status>completed</status>\n" +
+        "<summary>Background command \"build\" completed</summary>\n<result>$ make</result>\n</task-notification>"
+      assert.deepStrictEqual(t.delta({ message_type: "user_message", id: "u1", content: `${subagent}\n${shell}` }), [
+        { _tag: "SubagentsReported", subagentIds: ["subagent-1792186857398-1"] }
+      ])
+      assert.deepStrictEqual(t.delta({ message_type: "user_message", id: "u2", content: shell }), [])
+      assert.deepStrictEqual(t.history({ message_type: "user_message", id: "u3", content: subagent }), [])
+    }))
+
   it.effect("closes open tool calls when a turn ends", () =>
     Effect.gen(function*() {
       const t = yield* make

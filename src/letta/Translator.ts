@@ -63,10 +63,12 @@ export interface Translator {
   readonly finishTurn: (stopReason: "cancelled" | "error" | "end_turn") => ReadonlyArray<SessionEvent>
 }
 
-/** A translated event, or a user-message echo the session may want to drop. */
+/** A translated event, a user-message echo the session may want to drop, or a report of finished work. */
 export type TranslatedEvent =
   | { readonly _tag: "Event"; readonly event: SessionEvent }
   | { readonly _tag: "UserEcho"; readonly otid: Option.Option<string>; readonly event: SessionEvent }
+  /** Letta delivered the `<task-notification>` reports of these background subagents. */
+  | { readonly _tag: "SubagentsReported"; readonly subagentIds: ReadonlyArray<string> }
   | {
     readonly _tag: "LoopError"
     readonly message: string
@@ -133,6 +135,15 @@ const stripInjected = (text: string) =>
       ""
     )
     .trim()
+
+/**
+ * The background subagents whose reports a user message carries. Letta Code
+ * opens each subagent report's result with `subagent_id=<id>`; reports of
+ * background shell commands and monitors carry none.
+ */
+const reportedSubagents = (text: string): ReadonlyArray<string> =>
+  Array.from(text.matchAll(/<task-notification>[\s\S]*?(?:<\/task-notification>|$)/g))
+    .flatMap((report) => Option.toArray(Option.fromNullishOr(/\bsubagent_id=([^\s<]+)/.exec(report[0])?.[1])))
 
 const clip = (text: string) => (text.length > MAX_OUTPUT ? `${text.slice(0, MAX_OUTPUT)}\n… (truncated)` : text)
 
@@ -380,14 +391,20 @@ export const make = (context: TranslatorContext): Translator => {
       case "user_message":
         return Option.match(decodeUser(delta), {
           onNone: () => [],
-          onSome: (d) => {
-            const text = stripInjected(contentText(d.content))
-            if (text === "") return []
-            return [{
-              _tag: "UserEcho",
-              otid: Option.fromNullishOr(d.otid),
-              event: { _tag: "UserMessageChunk", messageId: d.otid ?? d.id, content: Content.text(text) }
-            }]
+          onSome: (d): Array<TranslatedEvent> => {
+            const raw = contentText(d.content)
+            const reported = reportedSubagents(raw)
+            const text = stripInjected(raw)
+            return [
+              ...(reported.length > 0 ? [{ _tag: "SubagentsReported", subagentIds: reported } as const] : []),
+              ...(text === "" ? [] : [
+                {
+                  _tag: "UserEcho",
+                  otid: Option.fromNullishOr(d.otid),
+                  event: { _tag: "UserMessageChunk", messageId: d.otid ?? d.id, content: Content.text(text) }
+                } as const
+              ])
+            ]
           }
         })
       case "tool_call_message":
@@ -465,7 +482,8 @@ export const make = (context: TranslatorContext): Translator => {
 
   return {
     delta: translate,
-    history: (message) => translate(message).flatMap((item) => (item._tag === "LoopError" ? [] : [item.event])),
+    history: (message) =>
+      translate(message).flatMap((item) => (item._tag === "Event" || item._tag === "UserEcho" ? [item.event] : [])),
     permission: (request) => {
       const isNew = !tools.has(request.tool_call_id)
       const state = tool(request.tool_call_id, request.tool_name)

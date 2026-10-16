@@ -4,7 +4,7 @@
  * the final failure report, goes to stderr.
  */
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Cause, Config, Effect, Layer, Logger, Option, References } from "effect"
+import { Cause, Config, Effect, Layer, Logger, type LogLevel, Option, References } from "effect"
 import { CliError } from "effect/cli"
 import { homedir } from "node:os"
 import { cli } from "./Cli.ts"
@@ -22,12 +22,32 @@ const HostLive = Layer.succeed(
   })
 )
 
+/** The level names `--log-level` takes; `LACP_LOG_LEVEL` takes them in any case. */
+const LOG_LEVELS: ReadonlyMap<string, LogLevel.LogLevel> = new Map([
+  ["all", "All"],
+  ["trace", "Trace"],
+  ["debug", "Debug"],
+  ["info", "Info"],
+  ["warn", "Warn"],
+  ["warning", "Warn"],
+  ["error", "Error"],
+  ["fatal", "Fatal"],
+  ["none", "None"]
+])
+
 /** `LACP_LOG_LEVEL` sets the minimum log level when the `--log-level` flag is not used. */
 const LogLevelLive = Layer.unwrap(
-  Config.option(Config.LogLevel("LACP_LOG_LEVEL")).pipe(
+  Config.option(Config.String("LACP_LOG_LEVEL")).pipe(
     Effect.map(Option.match({
       onNone: () => Layer.empty,
-      onSome: (level) => Layer.succeed(References.MinimumLogLevel, level)
+      onSome: (name) => {
+        const level = LOG_LEVELS.get(name.trim().toLowerCase())
+        return level === undefined
+          ? Layer.effectDiscard(
+            Effect.logWarning(`Ignoring LACP_LOG_LEVEL=${name}; use one of ${Array.from(LOG_LEVELS.keys()).join(", ")}`)
+          )
+          : Layer.succeed(References.MinimumLogLevel, level)
+      }
     })),
     Effect.orElseSucceed(() => Layer.empty)
   )

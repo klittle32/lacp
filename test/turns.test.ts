@@ -44,6 +44,7 @@ describe("turns", () => {
   it.live("the late end of a turn lacp ended itself does not end the next one", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
+      yield* fake.on("abort_message", () => ({ success: true, aborted: false }))
       const client = yield* start(fake, { cancelGrace })
       yield* client.request("initialize", initializeV1)
       const sessionId = (yield* client.request("session/new", { cwd: "/work", mcpServers: [] })).result
@@ -74,6 +75,28 @@ describe("turns", () => {
       assert.deepStrictEqual((yield* Fiber.join(second)).result, { stopReason: "end_turn" })
       const chunks = (yield* client.updates).filter((u) => u.sessionUpdate === "agent_message_chunk")
       assert.notInclude(chunks.map((u) => u.content.text), "Late")
+    }))
+
+  it.live("a cancel Letta acknowledges ends the turn without waiting for Letta to end it", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      // The default cancel fallback (15 seconds) applies, so only the acknowledgement can end the turn in time.
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const sessionId = (yield* client.request("session/new", { cwd: "/work" })).result.sessionId as string
+      yield* client.request("session/prompt", { sessionId, prompt: text("think quietly") })
+      yield* fake.waitFor(isInput)
+      yield* client.notify("session/cancel", { sessionId })
+      const ended = yield* client.update((u) => u.sessionUpdate === "state_update" && u.state === "idle").pipe(
+        Effect.timeout("1 second")
+      )
+      assert.strictEqual(ended.stopReason, "cancelled")
+
+      // Letta ends the aborted turn once its silent model request settles; lacp never saw that run.
+      yield* fake.emit(Fake.turnFinished(sessionId, "cancelled", { run_id: "run-unseen" }))
+      yield* Effect.sleep("50 millis")
+      const idles = (yield* client.updates).filter((u) => u.sessionUpdate === "state_update" && u.state === "idle")
+      assert.strictEqual(idles.length, 1)
     }))
 
   it.live("a cancelled slash command does not hold up the next prompt", () =>

@@ -211,7 +211,7 @@ interface Session {
   readonly ownMessages: Set<string>
   /** Runs of turns lacp ended itself; their late frames are ignored. */
   readonly abandonedRuns: Set<string>
-  /** Running background subagents that will report back (not silent). */
+  /** Background subagents that will report back (not silent): running in Letta's last snapshot, not yet reported. */
   backgroundSubagents: ReadonlySet<string>
   /** Reports of finished background work waiting in Letta's queue. */
   queuedNotifications: number
@@ -354,6 +354,8 @@ export class Agent extends Context.Service<Agent, {
           // The late end of a turn lacp ended itself must not end the next one.
           if (frame.run_id != null && session.abandonedRuns.has(frame.run_id)) return
           const turn = session.turn
+          // Nothing is running, so this is the late end of a turn lacp ended before seeing any of its runs.
+          if (Option.isNone(turn) && session.foreground === "idle") return
           if (Option.isSome(turn) && !turn.value.accepted) {
             turn.value.early = Option.some(frame)
             return
@@ -374,7 +376,8 @@ export class Agent extends Context.Service<Agent, {
               ? Option.some({ code: -32603, message: message ?? `Letta Code stopped: ${frame.stop_reason}` })
               : Option.none()
           }
-          if (Option.isSome(turn) && awaitsBackground(session, turn.value)) {
+          // A cancelled turn ends now, whatever is still running in the background.
+          if (stopReason !== "cancelled" && Option.isSome(turn) && awaitsBackground(session, turn.value)) {
             if (Option.isNone(turn.value.held)) {
               yield* Effect.logInfo(`Keeping the turn open until its background work in ${session.id} reports back`)
             }
@@ -468,6 +471,14 @@ export class Agent extends Context.Service<Agent, {
           if (Option.isSome(session.turn) && Option.isSome(session.turn.value.held)) session.turn.value.followUp = true
           for (const item of session.translator.delta(frame.delta)) {
             switch (item._tag) {
+              case "SubagentsReported": {
+                // The report is the reliable end of a subagent: once the turn that started it
+                // has ended, Letta Code may never send the subagent's final state.
+                const outstanding = new Set(session.backgroundSubagents)
+                for (const id of item.subagentIds) outstanding.delete(id)
+                session.backgroundSubagents = outstanding
+                continue
+              }
               case "UserEcho": {
                 const own = Option.isSome(item.otid) && session.ownMessages.has(item.otid.value)
                 if (own) {
@@ -1230,33 +1241,34 @@ export class Agent extends Context.Service<Agent, {
           yield* completeTurn(session, { stopReason: "cancelled", error: Option.none() })
           return
         }
+        /** Ends the turn without waiting for Letta to report its end, dropping the turn's late output. */
+        const abandon = Effect.suspend(() =>
+          Option.isSome(session.turn) && session.turn.value === turn
+            ? Effect.sync(() => turn.runs.forEach((run) => session.abandonedRuns.add(run))).pipe(
+              Effect.andThen(completeTurn(session, { stopReason: "cancelled", error: Option.none() }))
+            )
+            : Effect.void
+        )
         const attachment = session.attachment
         if (Option.isSome(attachment)) {
           yield* attachment.value.connection.call(
             (request_id) => ({ type: "abort_message", request_id, runtime: attachment.value.runtime }),
             Schema.Struct({
+              aborted: Schema.optionalKey(Schema.Boolean),
               success: Schema.optionalKey(Schema.Boolean),
               error: Schema.optionalKey(Schema.NullOr(Schema.String))
             }),
             { timeout: "10 seconds" }
           ).pipe(
+            // Letta reports the end of an aborted turn only once the model request settles,
+            // which can take as long as the model stays silent; its acknowledgement is enough.
+            Effect.flatMap((response) => response.aborted === true ? abandon : Effect.void),
             Effect.catch((error) => Effect.logWarning(`Letta did not acknowledge the cancellation: ${error.message}`)),
             Effect.forkIn(session.scope)
           )
         }
         // If Letta never reports the end of the turn, end it ourselves.
-        yield* Effect.sleep(config.cancelGrace).pipe(
-          Effect.andThen(
-            Effect.suspend(() =>
-              Option.isSome(session.turn) && session.turn.value === turn
-                ? Effect.sync(() => turn.runs.forEach((run) => session.abandonedRuns.add(run))).pipe(
-                  Effect.andThen(completeTurn(session, { stopReason: "cancelled", error: Option.none() }))
-                )
-                : Effect.void
-            )
-          ),
-          Effect.forkIn(session.scope)
-        )
+        yield* Effect.sleep(config.cancelGrace).pipe(Effect.andThen(abandon), Effect.forkIn(session.scope))
       })
 
       const setConfigOption = Effect.fn("Agent.setConfigOption")(

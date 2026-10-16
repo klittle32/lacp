@@ -257,7 +257,8 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
         let nextId = 0
 
         const route = (text: string) =>
-          decodeFrame(text).pipe(
+          Effect.logTrace("letta <-", text).pipe(
+            Effect.andThen(decodeFrame(text)),
             Effect.flatMap((raw) =>
               Option.match(decodeHeader(raw), {
                 onNone: () => Effect.logDebug("Ignoring a Letta frame without a type"),

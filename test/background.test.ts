@@ -31,20 +31,35 @@ const spawnWorker = (fake: Fake.FakeLetta, sessionId: string) =>
     yield* fake.emit(Fake.turnFinished(sessionId, "end_turn", { run_id: "run-1" }))
   })
 
-/** The worker finishes, and Letta runs the parent's follow-up turn with its report. */
-const reportBack = (fake: Fake.FakeLetta, sessionId: string) =>
+/** A subagent's report, as Letta Code writes it. */
+const notification = (subagentId: string) =>
+  `<task-notification>\n<task-id>task_1</task-id>\n<status>completed</status>\n` +
+  `<summary>Agent "List directory" completed</summary>\n` +
+  `<result>subagent_type=general-purpose subagent_id=${subagentId} subagent_status=success\n\na.txt</result>\n` +
+  `</task-notification>\nFull transcript available at: /tmp/task_1.log`
+
+/**
+ * The worker finishes, and Letta runs the parent's follow-up turn with its
+ * report. As in Letta Code 0.34.15, nothing reports the worker's final state:
+ * once the turn that started it has ended, Letta drops that update.
+ */
+const reportBack = (
+  fake: Fake.FakeLetta,
+  sessionId: string,
+  { id = "worker", reply = "Here is the listing", run = "run-2" } = {}
+) =>
   Effect.gen(function*() {
-    yield* fake.emit(Fake.subagents(sessionId, [{ id: "worker", status: "completed" }]))
     yield* fake.emit(Fake.queue(sessionId, ["task_notification"]))
+    yield* fake.emit(Fake.delta(sessionId, { message_type: "user_message", id: `u-${run}`, content: notification(id) }))
     yield* fake.emit(Fake.queue(sessionId, []))
     yield* fake.emit(Fake.delta(sessionId, {
-      message_type: "user_message",
-      id: "u2",
-      content: "<task-notification><summary>Agent finished</summary></task-notification>",
-      run_id: "run-2"
+      message_type: "reasoning_message",
+      id: `r-${run}`,
+      reasoning: "The worker finished",
+      run_id: run
     }))
-    yield* say(fake, sessionId, "a2", "Here is the listing", "run-2")
-    yield* fake.emit(Fake.turnFinished(sessionId, "end_turn", { run_id: "run-2" }))
+    yield* say(fake, sessionId, `a-${run}`, reply, run)
+    yield* fake.emit(Fake.turnFinished(sessionId, "end_turn", { run_id: run }))
   })
 
 const idle = (u: any) => u.sessionUpdate === "state_update" && u.state === "idle"
@@ -68,6 +83,44 @@ describe("background work", () => {
       assert.strictEqual(updates.filter(idle).length, 1)
       // The injected report is not shown as something the user said.
       assert.isFalse(updates.some((u) => u.sessionUpdate === "user_message_chunk"))
+    }))
+
+  it.live("waits for every worker the turn started", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const { client, sessionId } = yield* v2(fake)
+      yield* client.request("session/prompt", { sessionId, prompt: text("spawn two workers") })
+      yield* say(fake, sessionId, "a1", "Workers started", "run-1")
+      yield* fake.emit(Fake.subagents(sessionId, [{ id: "w1", status: "running" }, { id: "w2", status: "running" }]))
+      yield* fake.emit(Fake.turnFinished(sessionId, "end_turn", { run_id: "run-1" }))
+
+      yield* reportBack(fake, sessionId, { id: "w1", reply: "First listing", run: "run-2" })
+      yield* Effect.sleep("300 millis")
+      assert.isFalse((yield* client.updates).some(idle), "the turn ended while a worker was running")
+
+      yield* reportBack(fake, sessionId, { id: "w2", reply: "Second listing", run: "run-3" })
+      yield* client.update(idle)
+      yield* Effect.sleep("20 millis")
+      const updates = yield* client.updates
+      const chunks = updates.filter((u) => u.sessionUpdate === "agent_message_chunk").map((u) => u.content.text)
+      assert.deepStrictEqual(chunks, ["Workers started", "First listing", "Second listing"])
+      assert.strictEqual(updates.filter(idle).length, 1)
+    }))
+
+  it.live("does not hold a turn Letta ends as cancelled", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      // Letta has nothing to abort yet, so only its end of the turn can end it before the cancel fallback.
+      yield* fake.on("abort_message", () => ({ success: true, aborted: false }))
+      const { client, sessionId } = yield* v2(fake)
+      yield* client.request("session/prompt", { sessionId, prompt: text("spawn a worker") })
+      yield* say(fake, sessionId, "a1", "Starting a worker", "run-1")
+      yield* fake.emit(Fake.subagents(sessionId, [{ id: "worker", status: "running" }]))
+      yield* client.notify("session/cancel", { sessionId })
+      yield* fake.waitFor((c) => c.type === "abort_message")
+      yield* fake.emit(Fake.turnFinished(sessionId, "cancelled", { run_id: "run-1" }))
+      const ended = yield* client.update(idle).pipe(Effect.timeout("1 second"))
+      assert.strictEqual(ended.stopReason, "cancelled")
     }))
 
   it.live("ends the turn after a grace period when no report follows", () =>

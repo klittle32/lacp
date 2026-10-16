@@ -60,14 +60,19 @@ src/
      If the turn started background subagents that are still running (`update_subagent_state`, not silent) or a
      `task_notification` is queued (`update_queue`), the result is held instead: the subagent's report comes in a
      follow-up turn Letta runs on its own, which streams into the still-open turn, and that turn's end resolves it
-     (or the held result stands if no follow-up starts within a grace period). Cancelling a held turn ends it at
-     once. This is for clients that do not show turns the agent starts on its own, such as T3 Code.
+     (or the held result stands if no follow-up starts within a grace period). A subagent counts as done when its
+     state says so or when its report arrives (the `subagent_id=` in the `<task-notification>`): once the turn
+     that started it has ended, Letta Code does not send the subagent's final state. A turn Letta ends as
+     cancelled is never held, and cancelling a held turn ends it at once. This is for clients that do not show
+     turns the agent starts on its own, such as T3 Code.
 4. `AcpClient` projects each event onto the negotiated version (`ProjectV1` / `ProjectV2`) and sends
    `session/update` notifications in order, always before the v1 prompt response.
 
-Cancellation sends `abort_message`; if Letta never reports the end of the turn, the turn is ended locally after
-15 seconds. A queued input (Letta still finishing earlier work) only counts as started once Letta dequeues or
-echoes it, so a `turn_finished` for the earlier work cannot end the new turn.
+Cancellation sends `abort_message` and ends the turn as soon as Letta acknowledges the abort: Letta reports the end
+of an aborted turn only once the model request settles, which takes as long as the model stays silent. If Letta
+has nothing to abort and never reports the end of the turn, the turn is ended locally after 15 seconds. Either way
+the turn's late output and end are dropped. A queued input (Letta still finishing earlier work) only counts as
+started once Letta dequeues or echoes it, so a `turn_finished` for the earlier work cannot end the new turn.
 
 ## The Letta connection
 
