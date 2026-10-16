@@ -26,6 +26,16 @@ const callRequest = (sessionId: string, id: string, tool: string, input: Record<
 
 const isResponse = (id: string) => (c: any) => c.type === "external_tool_call_response" && c.request_id === id
 
+/** Sends the session's first prompt (which starts its conversation) and returns the conversation. */
+const firstPrompt = (client: Effect.Success<ReturnType<typeof start>>, fake: Fake.FakeLetta, sessionId: string) =>
+  Effect.gen(function*() {
+    yield* client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "echo hi" }] }).pipe(
+      Effect.forkChild
+    )
+    yield* fake.waitFor((c) => c.type === "input")
+    return yield* fake.conversation
+  })
+
 describe("client MCP servers", () => {
   it.live("registers their tools with Letta and runs Letta's calls against them (v2)", () =>
     Effect.gen(function*() {
@@ -34,7 +44,9 @@ describe("client MCP servers", () => {
       yield* client.request("initialize", initializeHybrid)
       const created = yield* client.request("session/new", { cwd, mcpServers: [v2Server] })
       const sessionId = created.result.sessionId as string
+      assert.isUndefined((yield* Ref.get(fake.commands)).find((c) => c.type === "runtime_start"))
 
+      const conversation = yield* firstPrompt(client, fake, sessionId)
       const runtimeStart = (yield* Ref.get(fake.commands)).find((c) => c.type === "runtime_start") as any
       assert.deepStrictEqual(toolNames(runtimeStart), [
         "mcp__fixture__echo",
@@ -44,8 +56,7 @@ describe("client MCP servers", () => {
       ])
       assert.strictEqual(runtimeStart.external_tools[0].tools[0].auto_background, false)
 
-      yield* client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "echo hi" }] })
-      yield* fake.emit(Fake.delta(sessionId, {
+      yield* fake.emit(Fake.delta(conversation, {
         message_type: "tool_call_message",
         id: "m1",
         tool_call: { tool_call_id: "call-1", name: "mcp__fixture__echo", arguments: "{\"text\":\"hi\"}" }
@@ -54,12 +65,12 @@ describe("client MCP servers", () => {
       assert.strictEqual(toolCall.title, "fixture: Echo")
       assert.strictEqual(toolCall.kind, "read")
 
-      yield* fake.emit(callRequest(sessionId, "1", "mcp__fixture__echo", { text: "hi" }))
+      yield* fake.emit(callRequest(conversation, "1", "mcp__fixture__echo", { text: "hi" }))
       const response = (yield* fake.waitFor(isResponse("1"))) as any
       assert.deepStrictEqual(response.result, { content: [{ type: "text", text: "hi" }] })
 
       // The server's roots are the session's working directory.
-      yield* fake.emit(callRequest(sessionId, "2", "mcp__fixture__roots", {}))
+      yield* fake.emit(callRequest(conversation, "2", "mcp__fixture__roots", {}))
       const roots = (yield* fake.waitFor(isResponse("2"))) as any
       assert.strictEqual(JSON.parse(roots.result.content[0].text)[0].name, "fixtures")
     }))
@@ -71,13 +82,14 @@ describe("client MCP servers", () => {
       yield* client.request("initialize", initializeV1)
       const created = yield* client.request("session/new", { cwd, mcpServers: [v1Server] })
       const sessionId = created.result.sessionId as string
+      const conversation = yield* firstPrompt(client, fake, sessionId)
 
-      yield* fake.emit(callRequest(sessionId, "r", "mcp__fixture__reveal", {}))
+      yield* fake.emit(callRequest(conversation, "r", "mcp__fixture__reveal", {}))
       const update = (yield* fake.waitFor((c) => c.type === "runtime_external_tools_update")) as any
-      assert.deepStrictEqual(update.updates[0].runtimes, [Fake.runtime(sessionId)])
+      assert.deepStrictEqual(update.updates[0].runtimes, [Fake.runtime(conversation)])
       assert.include(toolNames(update.updates[0]), "mcp__fixture__secret")
 
-      yield* fake.emit(callRequest(sessionId, "s", "mcp__fixture__secret", {}))
+      yield* fake.emit(callRequest(conversation, "s", "mcp__fixture__secret", {}))
       const response = (yield* fake.waitFor(isResponse("s"))) as any
       assert.deepStrictEqual(response.result, { content: [{ type: "text", text: "42" }] })
     }))
@@ -95,6 +107,7 @@ describe("client MCP servers", () => {
       const notice = yield* client.update((u) => u.sessionUpdate === "notice")
       assert.strictEqual(notice.severity, "warning")
       assert.strictEqual(notice.title, "MCP server \"broken\" is unavailable")
+      yield* firstPrompt(client, fake, created.result.sessionId)
       const runtimeStart = (yield* Ref.get(fake.commands)).find((c) => c.type === "runtime_start") as any
       assert.include(toolNames(runtimeStart), "mcp__fixture__echo")
     }))
@@ -120,7 +133,8 @@ describe("client MCP servers", () => {
       const fake = yield* Fake.make
       const client = yield* start(fake)
       yield* client.request("initialize", initializeV1)
-      yield* client.request("session/new", { cwd: "/work", mcpServers: [] })
+      const created = yield* client.request("session/new", { cwd: "/work", mcpServers: [] })
+      yield* firstPrompt(client, fake, created.result.sessionId)
       const runtimeStart = (yield* Ref.get(fake.commands)).find((c) => c.type === "runtime_start") as any
       assert.notProperty(runtimeStart, "external_tools")
     }))

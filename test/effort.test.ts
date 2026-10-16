@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest"
-import { Effect, Ref } from "effect"
+import { Effect, Option, Ref } from "effect"
 import { LettaAppServer } from "../src/letta/AppServer.ts"
 import { initializeHybrid, initializeV1, start, startWith } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
@@ -15,6 +15,10 @@ const setup = (fake: Fake.FakeLetta) =>
 /** `session/set_config_option` as T3 Code sends it (v2). */
 const set = (client: Effect.Success<ReturnType<typeof start>>, sessionId: string, configId: string, value: string) =>
   client.request("session/set_config_option", { sessionId, configId, type: "id", value })
+
+/** A v2 prompt, which gives the session its conversation. */
+const prompt = (client: Effect.Success<ReturnType<typeof start>>, sessionId: string) =>
+  client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] })
 
 const option = (options: ReadonlyArray<any>, id: string) => options.find((o) => o.configId === id || o.id === id)
 
@@ -45,19 +49,27 @@ describe("effort", () => {
       assert.deepStrictEqual(yield* Ref.get(fake.cliCalls), [["model", "list"]])
     }))
 
-  it.live("sets effort through the model's preset", () =>
+  it.live("sets effort through the model's preset, once the first prompt creates the conversation", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* setup(fake)
       const reply = yield* set(client, sessionId, "effort", "high")
       assert.strictEqual(option(reply.result.configOptions, "effort").currentValue, "high")
+      // Nothing is sent to Letta before the session has a conversation.
+      assert.deepStrictEqual(yield* updates(fake), [])
+      yield* prompt(client, sessionId)
       assert.deepStrictEqual(yield* updates(fake), [{ model_id: "sonnet-high", model_handle: Fake.MODEL }])
+      // Afterwards, changes apply right away.
+      yield* set(client, sessionId, "effort", "low")
+      assert.deepStrictEqual((yield* updates(fake)).at(-1), { model_id: "sonnet-low", model_handle: Fake.MODEL })
     }))
 
   it.live("keeps the effort when switching to a model that sets it with `letta model set`", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* setup(fake)
+      yield* prompt(client, sessionId)
+      const conversation = yield* fake.conversation
       yield* set(client, sessionId, "effort", "high")
       const reply = yield* set(client, sessionId, "model", Fake.BYOK_MODEL)
       const effort = option(reply.result.configOptions, "effort")
@@ -69,20 +81,24 @@ describe("effort", () => {
       })
       assert.deepStrictEqual(
         (yield* Ref.get(fake.cliCalls)).at(-1),
-        ["model", "set", "--conversation", sessionId, "--reasoning", "high"]
+        ["model", "set", "--conversation", conversation, "--reasoning", "high"]
       )
     }))
 
-  it.live("sets effort on a model without presets through `letta model set`", () =>
+  it.live("applies a model and effort chosen before the first prompt to the new conversation", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* setup(fake)
       yield* set(client, sessionId, "model", Fake.BYOK_MODEL)
       const reply = yield* set(client, sessionId, "effort", "minimal")
       assert.strictEqual(option(reply.result.configOptions, "effort").currentValue, "minimal")
+      assert.deepStrictEqual(yield* updates(fake), [])
+      yield* prompt(client, sessionId)
+      const conversation = yield* fake.conversation
+      assert.deepStrictEqual(yield* updates(fake), [{ model_id: Fake.BYOK_MODEL, model_handle: Fake.BYOK_MODEL }])
       assert.deepStrictEqual(
         (yield* Ref.get(fake.cliCalls)).at(-1),
-        ["model", "set", "--conversation", sessionId, "--reasoning", "minimal"]
+        ["model", "set", "--conversation", conversation, "--reasoning", "minimal"]
       )
     }))
 
@@ -98,6 +114,7 @@ describe("effort", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const client = yield* startWith(LettaAppServer.layerConnection(fake.connection), {
+        config: { agentId: Option.some(Fake.AGENT_ID) },
         host: { home: "/nonexistent-home", cwd: "/work" }
       })
       yield* client.request("initialize", initializeV1)

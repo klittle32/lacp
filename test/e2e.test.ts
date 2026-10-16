@@ -87,7 +87,8 @@ describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
 
       const created = yield* client.request("session/new", { cwd })
       const sessionId = created.result.sessionId as string
-      assert.isString(sessionId)
+      // The conversation is created with the first prompt; the session has lacp's id until then and after.
+      assert.match(sessionId, /^lacp-/)
       assert.strictEqual(
         created.result.configOptions.find((o: any) => o.configId === "mode")?.currentValue,
         "standard"
@@ -119,6 +120,8 @@ describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
       const listed = yield* client.request("session/list", { cwd })
       assert.include(listed.result.sessions.map((s: any) => s.sessionId), sessionId)
 
+      // Closed first, so resuming finds the conversation behind the id again and attaches to it.
+      yield* client.request("session/close", { sessionId })
       const resumedFrom = (yield* client.updates).length
       const resumed = yield* client.request("session/resume", { sessionId, cwd, replayFrom: { type: "start" } })
       assert.isDefined(resumed.result.configOptions)

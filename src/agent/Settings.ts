@@ -7,7 +7,7 @@
  * Effort is applied through the model's catalog preset where it has one, and
  * with `letta model set --reasoning` otherwise; the mode is device state.
  */
-import { Context, Effect, Layer, Option, Schema } from "effect"
+import { Context, Effect, Equal, Layer, Option, Schema } from "effect"
 import { LacpConfig } from "../Config.ts"
 import type { ConfigOption } from "../domain/Events.ts"
 import { LettaAppServer, type LettaConnection } from "../letta/AppServer.ts"
@@ -53,9 +53,9 @@ export interface SessionSettings {
   readonly models: ReadonlyArray<Models.ModelChoice>
 }
 
-/** The settings of a newly started runtime. */
+/** The settings of a conversation, or of its agent's new conversations. */
 export const initialSettings = (
-  started: RuntimeStartResponse,
+  started: Pick<RuntimeStartResponse, "agent" | "conversation">,
   models: ReadonlyArray<Models.ModelChoice>,
   mode: Option.Option<PermissionMode>
 ): SessionSettings => ({
@@ -124,8 +124,16 @@ export class Settings extends Context.Service<Settings, {
     configId: string,
     value: string
   ): Effect.Effect<void, InvalidConfigValue | AgentUnavailable>
-  /** Switches a new session to the configured model (`LACP_MODEL`), if any. */
-  applyConfiguredModel(settings: SessionSettings, target: Target): Effect.Effect<void>
+  /** Records a change for a session without a conversation; `realize` applies it once there is one. */
+  choose(settings: SessionSettings, configId: string, value: string): Effect.Effect<void, InvalidConfigValue>
+  /**
+   * Brings a newly created conversation to the model and effort chosen before
+   * it existed. `created` is what Letta gave it; `settings` ends up recording
+   * what Letta applied.
+   */
+  realize(settings: SessionSettings, target: Target, created: SessionSettings): Effect.Effect<void>
+  /** Gives a new session the configured model (`LACP_MODEL`), if any. */
+  preferConfiguredModel(settings: SessionSettings): Effect.Effect<void>
 }>()("lacp/agent/Settings") {
   static readonly layer = Layer.effect(
     Settings,
@@ -299,27 +307,98 @@ export class Settings extends Context.Service<Settings, {
           : setter(settings, target, value)
       })
 
-      const applyConfiguredModel = Effect.fn("Settings.applyConfiguredModel")(function*(
-        settings: SessionSettings,
-        target: Target
-      ) {
-        if (Option.isNone(config.model)) return
-        const wanted = config.model.value
-        const choice = Models.choiceFor(settings.models, wanted)
-        if (Option.exists(choice, (c) => Option.contains(settings.model, c.handle))) return
-        if (Option.isNone(choice) && Option.contains(settings.model, wanted)) return
-        yield* Option.match(choice, {
-          onSome: (c) => applyModel(settings, target, c),
-          onNone: () =>
-            updateModel(target, { model_handle: wanted }).pipe(
-              Effect.map((response) =>
-                record(settings, Option.some(response.model_handle ?? wanted), response.model_settings)
-              )
-            )
-        }).pipe(Effect.catch((error) => Effect.logWarning(`Could not apply LACP_MODEL=${wanted}: ${error.message}`)))
-      })
+      type Chooser = (settings: SessionSettings, value: string) => Effect.Effect<void, InvalidConfigValue>
 
-      return Settings.of({ catalog, set, applyConfiguredModel })
+      const chooseMode: Chooser = (settings, value) =>
+        Option.match(decodePermissionMode(value), {
+          onNone: () => Effect.fail(new InvalidConfigValue({ configId: MODE_CONFIG_ID, value })),
+          onSome: (mode) => Effect.sync(() => (settings.mode = Option.some(mode)))
+        })
+
+      const chooseModel: Chooser = (settings, value) =>
+        Option.match(Models.choiceFor(settings.models, value), {
+          onNone: () => Effect.fail(new InvalidConfigValue({ configId: MODEL_CONFIG_ID, value })),
+          onSome: (choice) =>
+            Effect.sync(() => {
+              settings.model = Option.some(choice.handle)
+              settings.contextWindow = choice.contextWindow
+            })
+        })
+
+      const chooseEffort: Chooser = (settings, value) =>
+        Option.all({ choice: currentChoice(settings), effort: Models.decodeEffort(value) }).pipe(
+          Option.filter(({ choice, effort }) => choice.levels.includes(effort)),
+          Option.match({
+            onNone: () => Effect.fail(new InvalidConfigValue({ configId: EFFORT_CONFIG_ID, value })),
+            onSome: ({ effort }) => Effect.sync(() => (settings.effort = Option.some(effort)))
+          })
+        )
+
+      const choosers: Readonly<Record<string, Chooser>> = {
+        [MODE_CONFIG_ID]: chooseMode,
+        [MODEL_CONFIG_ID]: chooseModel,
+        [EFFORT_CONFIG_ID]: chooseEffort
+      }
+
+      const choose = Effect.fn("Settings.choose")(
+        function*(settings: SessionSettings, configId: string, value: string) {
+          const chooser = choosers[configId]
+          return yield* chooser === undefined
+            ? Effect.fail(new InvalidConfigValue({ configId, value }))
+            : chooser(settings, value)
+        }
+      )
+
+      const realize = Effect.fn("Settings.realize")(
+        function*(settings: SessionSettings, target: Target, created: SessionSettings) {
+          const wanted = { model: settings.model, effort: settings.effort, contextWindow: settings.contextWindow }
+          settings.model = created.model
+          settings.effort = created.effort
+          settings.contextWindow = created.contextWindow
+          const wantedChoice = Option.flatMap(
+            wanted.model,
+            (handle) => Models.findChoice(settings.models, handle, wanted.contextWindow)
+          )
+          const createdChoice = currentChoice(settings)
+          if (
+            Option.isSome(wantedChoice) &&
+            !Option.exists(createdChoice, (choice) => choice.key === wantedChoice.value.key)
+          ) {
+            settings.effort = wanted.effort
+            yield* applyModel(settings, target, wantedChoice.value)
+            return
+          }
+          if (
+            Option.isNone(wantedChoice) && Option.isSome(wanted.model) && !Equal.equals(wanted.model, settings.model)
+          ) {
+            // A configured model that is not in the catalog.
+            const response = yield* updateModel(target, { model_handle: wanted.model.value })
+            record(settings, Option.some(response.model_handle ?? wanted.model.value), response.model_settings)
+            return
+          }
+          const effort = Option.filter(
+            wanted.effort,
+            (effort) =>
+              !Option.contains(settings.effort, effort) &&
+              Option.exists(createdChoice, (choice) => choice.levels.includes(effort))
+          )
+          if (Option.isSome(effort) && Option.isSome(createdChoice)) {
+            yield* applyEffort(settings, target, createdChoice.value, effort.value)
+          }
+        },
+        Effect.catch((error) => Effect.logWarning(`Could not apply the chosen model or effort: ${error.message}`))
+      )
+
+      const preferConfiguredModel = (settings: SessionSettings) =>
+        Effect.sync(() => {
+          if (Option.isNone(config.model)) return
+          const wanted = config.model.value
+          const choice = Models.choiceFor(settings.models, wanted)
+          settings.model = Option.some(Option.match(choice, { onNone: () => wanted, onSome: (c) => c.handle }))
+          if (Option.isSome(choice)) settings.contextWindow = choice.value.contextWindow
+        })
+
+      return Settings.of({ catalog, set, choose, realize, preferConfiguredModel })
     })
   )
 }

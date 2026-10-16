@@ -20,6 +20,14 @@ const v2 = (fake: Fake.FakeLetta, config: Partial<LacpConfigShape> = {}) =>
     return { client, sessionId }
   })
 
+/** Sends a v2 prompt and returns the session's conversation, which the first prompt creates. */
+const send = (
+  client: Effect.Success<ReturnType<typeof start>>,
+  fake: Fake.FakeLetta,
+  sessionId: string,
+  value: string
+) => client.request("session/prompt", { sessionId, prompt: text(value) }).pipe(Effect.andThen(fake.conversation))
+
 const say = (fake: Fake.FakeLetta, sessionId: string, id: string, content: string, run: string) =>
   fake.emit(Fake.delta(sessionId, { message_type: "assistant_message", id, content, run_id: run }))
 
@@ -69,12 +77,12 @@ describe("background work", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* v2(fake)
-      yield* client.request("session/prompt", { sessionId, prompt: text("spawn a worker") })
-      yield* spawnWorker(fake, sessionId)
+      const conversation = yield* send(client, fake, sessionId, "spawn a worker")
+      yield* spawnWorker(fake, conversation)
       yield* Effect.sleep("300 millis")
       assert.isFalse((yield* client.updates).some(idle), "the turn ended while its worker was running")
 
-      yield* reportBack(fake, sessionId)
+      yield* reportBack(fake, conversation)
       yield* client.update(idle)
       yield* Effect.sleep("20 millis")
       const updates = yield* client.updates
@@ -89,16 +97,16 @@ describe("background work", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* v2(fake)
-      yield* client.request("session/prompt", { sessionId, prompt: text("spawn two workers") })
-      yield* say(fake, sessionId, "a1", "Workers started", "run-1")
-      yield* fake.emit(Fake.subagents(sessionId, [{ id: "w1", status: "running" }, { id: "w2", status: "running" }]))
-      yield* fake.emit(Fake.turnFinished(sessionId, "end_turn", { run_id: "run-1" }))
+      const conversation = yield* send(client, fake, sessionId, "spawn two workers")
+      yield* say(fake, conversation, "a1", "Workers started", "run-1")
+      yield* fake.emit(Fake.subagents(conversation, [{ id: "w1", status: "running" }, { id: "w2", status: "running" }]))
+      yield* fake.emit(Fake.turnFinished(conversation, "end_turn", { run_id: "run-1" }))
 
-      yield* reportBack(fake, sessionId, { id: "w1", reply: "First listing", run: "run-2" })
+      yield* reportBack(fake, conversation, { id: "w1", reply: "First listing", run: "run-2" })
       yield* Effect.sleep("300 millis")
       assert.isFalse((yield* client.updates).some(idle), "the turn ended while a worker was running")
 
-      yield* reportBack(fake, sessionId, { id: "w2", reply: "Second listing", run: "run-3" })
+      yield* reportBack(fake, conversation, { id: "w2", reply: "Second listing", run: "run-3" })
       yield* client.update(idle)
       yield* Effect.sleep("20 millis")
       const updates = yield* client.updates
@@ -113,12 +121,12 @@ describe("background work", () => {
       // Letta has nothing to abort yet, so only its end of the turn can end it before the cancel fallback.
       yield* fake.on("abort_message", () => ({ success: true, aborted: false }))
       const { client, sessionId } = yield* v2(fake)
-      yield* client.request("session/prompt", { sessionId, prompt: text("spawn a worker") })
-      yield* say(fake, sessionId, "a1", "Starting a worker", "run-1")
-      yield* fake.emit(Fake.subagents(sessionId, [{ id: "worker", status: "running" }]))
+      const conversation = yield* send(client, fake, sessionId, "spawn a worker")
+      yield* say(fake, conversation, "a1", "Starting a worker", "run-1")
+      yield* fake.emit(Fake.subagents(conversation, [{ id: "worker", status: "running" }]))
       yield* client.notify("session/cancel", { sessionId })
       yield* fake.waitFor((c) => c.type === "abort_message")
-      yield* fake.emit(Fake.turnFinished(sessionId, "cancelled", { run_id: "run-1" }))
+      yield* fake.emit(Fake.turnFinished(conversation, "cancelled", { run_id: "run-1" }))
       const ended = yield* client.update(idle).pipe(Effect.timeout("1 second"))
       assert.strictEqual(ended.stopReason, "cancelled")
     }))
@@ -127,9 +135,9 @@ describe("background work", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* v2(fake)
-      yield* client.request("session/prompt", { sessionId, prompt: text("spawn a worker") })
-      yield* spawnWorker(fake, sessionId)
-      yield* fake.emit(Fake.subagents(sessionId, [{ id: "worker", status: "completed" }]))
+      const conversation = yield* send(client, fake, sessionId, "spawn a worker")
+      yield* spawnWorker(fake, conversation)
+      yield* fake.emit(Fake.subagents(conversation, [{ id: "worker", status: "completed" }]))
       const ended = yield* client.update(idle)
       assert.strictEqual(ended.stopReason, "end_turn")
     }))
@@ -138,8 +146,8 @@ describe("background work", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* v2(fake)
-      yield* client.request("session/prompt", { sessionId, prompt: text("spawn a worker") })
-      yield* spawnWorker(fake, sessionId)
+      const conversation = yield* send(client, fake, sessionId, "spawn a worker")
+      yield* spawnWorker(fake, conversation)
       yield* Effect.sleep("50 millis")
       yield* client.notify("session/cancel", { sessionId })
       const ended = yield* client.update(idle)
@@ -150,24 +158,29 @@ describe("background work", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* v2(fake)
-      yield* fake.emit(Fake.subagents(sessionId, [{ id: "earlier", status: "running" }]))
+      // A first turn creates the conversation; afterwards a subagent is found running.
+      const conversation = yield* send(client, fake, sessionId, "first")
+      yield* fake.emit(Fake.turnFinished(conversation, "end_turn", { run_id: "run-0" }))
+      yield* client.update(idle)
+      yield* fake.emit(Fake.subagents(conversation, [{ id: "earlier", status: "running" }]))
       yield* Effect.sleep("20 millis")
-      yield* client.request("session/prompt", { sessionId, prompt: text("hi") })
-      yield* say(fake, sessionId, "a1", "Hello", "run-1")
-      yield* fake.emit(Fake.subagents(sessionId, [
+      const from = (yield* client.updates).length
+      yield* send(client, fake, sessionId, "hi")
+      yield* say(fake, conversation, "a1", "Hello", "run-1")
+      yield* fake.emit(Fake.subagents(conversation, [
         { id: "earlier", status: "running" },
         { id: "reflection", status: "running", silent: true }
       ]))
-      yield* fake.emit(Fake.turnFinished(sessionId, "end_turn", { run_id: "run-1" }))
-      yield* client.update(idle)
+      yield* fake.emit(Fake.turnFinished(conversation, "end_turn", { run_id: "run-1" }))
+      yield* client.update(idle, from)
     }))
 
   it.live("does not wait with --no-wait-for-background", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* v2(fake, { waitForBackground: false })
-      yield* client.request("session/prompt", { sessionId, prompt: text("spawn a worker") })
-      yield* spawnWorker(fake, sessionId)
+      const conversation = yield* send(client, fake, sessionId, "spawn a worker")
+      yield* spawnWorker(fake, conversation)
       yield* client.update(idle)
     }))
 
@@ -182,10 +195,11 @@ describe("background work", () => {
         Effect.forkChild
       )
       yield* fake.waitFor((c) => c.type === "input")
-      yield* spawnWorker(fake, sessionId)
+      const conversation = yield* fake.conversation
+      yield* spawnWorker(fake, conversation)
       yield* Effect.sleep("300 millis")
       assert.isUndefined(prompt.pollUnsafe())
-      yield* reportBack(fake, sessionId)
+      yield* reportBack(fake, conversation)
       assert.deepStrictEqual((yield* Fiber.join(prompt)).result, { stopReason: "end_turn" })
       const chunks = (yield* client.updates).filter((u) => u.sessionUpdate === "agent_message_chunk")
       assert.include(chunks.map((u) => u.content.text), "Here is the listing")

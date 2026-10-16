@@ -86,8 +86,8 @@ describe("ACP v1 sessions", () => {
   it.live("creates a session with modes, config options and commands", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, created } = yield* setup(fake)
-      assert.strictEqual(created.result.sessionId, "conv-1")
+      const { client, created, sessionId } = yield* setup(fake)
+      assert.match(sessionId, /^lacp-[0-9a-f-]{36}$/)
       assert.strictEqual(created.result.modes.currentModeId, "standard")
       const [model, effort, mode] = created.result.configOptions
       assert.strictEqual(effort.id, "effort")
@@ -96,7 +96,17 @@ describe("ACP v1 sessions", () => {
       assert.strictEqual(model.id, "model")
       assert.strictEqual(model.currentValue, Fake.MODEL)
       assert.deepStrictEqual(model.options.map((o: any) => o.value), [Fake.MODEL, "openai/gpt-5"])
-      const commands = yield* client.update((u) => u.sessionUpdate === "available_commands_update")
+      // Until the first prompt there is no runtime to report its commands, so the built-ins stand in.
+      const builtins = yield* client.update((u) => u.sessionUpdate === "available_commands_update")
+      assert.include(builtins.availableCommands.map((c: any) => c.name), "compact")
+      assert.isUndefined((yield* Ref.get(fake.commands)).find((c) => c.type === "runtime_start"))
+
+      // The first prompt starts the conversation, whose runtime reports the commands it has.
+      yield* client.request("session/prompt", { sessionId, prompt: text("hello") }).pipe(Effect.forkChild)
+      yield* fake.waitFor(isInput)
+      const commands = yield* client.update((u) =>
+        u.sessionUpdate === "available_commands_update" && u.availableCommands.some((c: any) => c.name === "plan")
+      )
       assert.deepStrictEqual(commands.availableCommands.map((c: any) => c.name), ["compact", "init", "plan"])
       assert.deepStrictEqual(commands.availableCommands[2].input, { hint: "<on|off>" })
       const start = (yield* Ref.get(fake.commands)).find((c) => c.type === "runtime_start") as any
@@ -113,22 +123,23 @@ describe("ACP v1 sessions", () => {
         Effect.forkChild
       )
       const input = (yield* fake.waitFor(isInput)) as any
+      const conversation = yield* fake.conversation
       assert.strictEqual(input.payload.messages[0].content, "hello")
       yield* fake.emit(
-        Fake.delta(sessionId, { message_type: "reasoning_message", id: "r1", otid: "o-r", reasoning: "Thinking" })
+        Fake.delta(conversation, { message_type: "reasoning_message", id: "r1", otid: "o-r", reasoning: "Thinking" })
       )
       yield* fake.emit(
-        Fake.delta(sessionId, { message_type: "assistant_message", id: "a1", otid: "o-a", content: "Hel" })
+        Fake.delta(conversation, { message_type: "assistant_message", id: "a1", otid: "o-a", content: "Hel" })
       )
       yield* fake.emit(
-        Fake.delta(sessionId, {
+        Fake.delta(conversation, {
           message_type: "assistant_message",
           id: "a1",
           otid: "o-a",
           content: [{ type: "text", text: "lo" }]
         })
       )
-      yield* fake.emit(Fake.turnFinished(sessionId, "end_turn", { usage: { context_tokens: 1234 } }))
+      yield* fake.emit(Fake.turnFinished(conversation, "end_turn", { usage: { context_tokens: 1234 } }))
       const reply = yield* Fiber.join(prompt)
       assert.deepStrictEqual(reply.result, { stopReason: "end_turn" })
       const updates = yield* client.updates
@@ -153,7 +164,8 @@ describe("ACP v1 sessions", () => {
       const { client, sessionId } = yield* setup(fake)
       const prompt = yield* client.request("session/prompt", { sessionId, prompt: text("hi") }).pipe(Effect.forkChild)
       yield* fake.waitFor(isInput)
-      yield* fake.emit(Fake.turnFinished(sessionId, "llm_api_error", { error: "Provider is not configured" }))
+      const conversation = yield* fake.conversation
+      yield* fake.emit(Fake.turnFinished(conversation, "llm_api_error", { error: "Provider is not configured" }))
       const reply = yield* Fiber.join(prompt)
       assert.strictEqual(reply.error?.message, "Provider is not configured")
     }))
@@ -166,14 +178,15 @@ describe("ACP v1 sessions", () => {
         Effect.forkChild
       )
       yield* fake.waitFor(isInput)
-      yield* fake.emit(Fake.delta(sessionId, {
+      const conversation = yield* fake.conversation
+      yield* fake.emit(Fake.delta(conversation, {
         message_type: "approval_request_message",
         id: "t",
         tool_call: { tool_call_id: "call-1", name: "Bash", arguments: "{\"command\":\"sleep 100\"}" }
       }))
       yield* client.notify("session/cancel", { sessionId })
       yield* fake.waitFor((c) => c.type === "abort_message")
-      yield* fake.emit(Fake.turnFinished(sessionId, "cancelled"))
+      yield* fake.emit(Fake.turnFinished(conversation, "cancelled"))
       assert.deepStrictEqual((yield* Fiber.join(prompt)).result, { stopReason: "cancelled" })
       const last = (yield* client.updates).findLast((u) => u.toolCallId === "call-1")
       assert.strictEqual(last.status, "failed")
@@ -187,10 +200,11 @@ describe("ACP v1 sessions", () => {
         Effect.forkChild
       )
       yield* fake.waitFor(isInput)
+      const conversation = yield* fake.conversation
       yield* fake.emit({
         type: "control_request",
         request_id: "perm-call-2",
-        runtime: Fake.runtime(sessionId),
+        runtime: Fake.runtime(conversation),
         request: {
           subtype: "can_use_tool",
           tool_name: "Edit",
@@ -233,7 +247,7 @@ describe("ACP v1 sessions", () => {
         oldText: "a",
         newText: "b"
       }])
-      yield* fake.emit(Fake.turnFinished(sessionId))
+      yield* fake.emit(Fake.turnFinished(conversation))
       yield* Fiber.join(prompt)
     }))
 
@@ -241,10 +255,13 @@ describe("ACP v1 sessions", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* setup(fake)
+      yield* client.request("session/prompt", { sessionId, prompt: text("test it") }).pipe(Effect.forkChild)
+      yield* fake.waitFor(isInput)
+      const conversation = yield* fake.conversation
       const permission = (id: string) => ({
         type: "control_request",
         request_id: `perm-${id}`,
-        runtime: Fake.runtime(sessionId),
+        runtime: Fake.runtime(conversation),
         request: {
           subtype: "can_use_tool",
           tool_name: "Bash",
@@ -273,6 +290,9 @@ describe("ACP v1 sessions", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* setup(fake)
+      // A prompt starts the conversation, so the changes reach Letta as they are made.
+      yield* client.request("session/prompt", { sessionId, prompt: text("hello") }).pipe(Effect.forkChild)
+      yield* fake.waitFor(isInput)
       const mode = yield* client.request("session/set_mode", { sessionId, modeId: "acceptEdits" })
       assert.deepStrictEqual(mode.result, {})
       const change = (yield* fake.waitFor((c) => c.type === "change_device_state")) as any
@@ -369,16 +389,19 @@ describe("ACP v1 sessions", () => {
       const { client, sessionId } = yield* setup(fake)
       const prompt = yield* client.request("session/prompt", { sessionId, prompt: text("next") }).pipe(Effect.forkChild)
       const input = (yield* fake.waitFor(isInput)) as any
+      const conversation = yield* fake.conversation
       const clientMessageId = input.payload.messages[0].client_message_id
       // The end of earlier background work must not end our queued turn.
-      yield* fake.emit(Fake.turnFinished(sessionId))
+      yield* fake.emit(Fake.turnFinished(conversation))
       yield* Effect.sleep("50 millis")
       assert.isUndefined(prompt.pollUnsafe())
       yield* fake.emit(
-        Fake.delta(sessionId, { message_type: "user_message", id: "u", otid: clientMessageId, content: "next" })
+        Fake.delta(conversation, { message_type: "user_message", id: "u", otid: clientMessageId, content: "next" })
       )
-      yield* fake.emit(Fake.delta(sessionId, { message_type: "assistant_message", id: "a", otid: "o", content: "ok" }))
-      yield* fake.emit(Fake.turnFinished(sessionId))
+      yield* fake.emit(
+        Fake.delta(conversation, { message_type: "assistant_message", id: "a", otid: "o", content: "ok" })
+      )
+      yield* fake.emit(Fake.turnFinished(conversation))
       assert.deepStrictEqual((yield* Fiber.join(prompt)).result, { stopReason: "end_turn" })
       assert.notInclude((yield* client.updates).map((u) => u.sessionUpdate), "user_message_chunk")
     }))
@@ -397,10 +420,9 @@ describe("ACP v2 sessions", () => {
     Effect.gen(function*() {
       const { created } = yield* setup(yield* Fake.make)
       assert.deepStrictEqual(created.result.configOptions.map((o: any) => o.configId), ["model", "effort", "mode"])
-      assert.deepStrictEqual(created.result.availableCommands[2], {
-        name: "plan",
-        description: "Toggle plan mode",
-        input: { type: "text", hint: "<on|off>" }
+      assert.deepStrictEqual(created.result.availableCommands[1], {
+        name: "compact",
+        description: "Summarize the conversation to free up context"
       })
     }))
 
@@ -409,10 +431,13 @@ describe("ACP v2 sessions", () => {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* setup(fake)
       const reply = yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
+      const conversation = yield* fake.conversation
       assert.isString(reply.result.messageId)
       yield* client.update((u) => u.sessionUpdate === "state_update" && u.state === "running")
-      yield* fake.emit(Fake.delta(sessionId, { message_type: "assistant_message", id: "a", otid: "o", content: "hi" }))
-      yield* fake.emit(Fake.turnFinished(sessionId))
+      yield* fake.emit(
+        Fake.delta(conversation, { message_type: "assistant_message", id: "a", otid: "o", content: "hi" })
+      )
+      yield* fake.emit(Fake.turnFinished(conversation))
       const idle = yield* client.update((u) => u.sessionUpdate === "state_update" && u.state === "idle")
       assert.deepStrictEqual(idle, { sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" })
       // Prompts are not echoed by default: T3 Code would show the echo as a second message.
@@ -439,7 +464,8 @@ describe("ACP v2 sessions", () => {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* setup(fake)
       yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
-      yield* fake.emit(Fake.turnFinished(sessionId, "insufficient_credits", { error: "Out of credits" }))
+      const conversation = yield* fake.conversation
+      yield* fake.emit(Fake.turnFinished(conversation, "insufficient_credits", { error: "Out of credits" }))
       const idle = yield* client.update((u) => u.sessionUpdate === "state_update" && u.state === "idle")
       assert.deepStrictEqual(idle, {
         sessionUpdate: "state_update",
@@ -454,10 +480,11 @@ describe("ACP v2 sessions", () => {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* setup(fake)
       yield* client.request("session/prompt", { sessionId, prompt: text("test it") })
+      const conversation = yield* fake.conversation
       yield* fake.emit({
         type: "control_request",
         request_id: "perm-sh",
-        runtime: Fake.runtime(sessionId),
+        runtime: Fake.runtime(conversation),
         request: {
           subtype: "can_use_tool",
           tool_name: "Bash",
@@ -473,16 +500,16 @@ describe("ACP v2 sessions", () => {
       assert.strictEqual(request?.params.title, "`npm test`")
       assert.strictEqual(request?.params.subject.type, "tool_call")
       yield* fake.emit(
-        Fake.delta(sessionId, { message_type: "client_tool_start", tool_call_id: "sh", tool_name: "Bash" })
+        Fake.delta(conversation, { message_type: "client_tool_start", tool_call_id: "sh", tool_name: "Bash" })
       )
-      yield* fake.emit(Fake.delta(sessionId, {
+      yield* fake.emit(Fake.delta(conversation, {
         message_type: "tool_return_message",
         id: "tool-return-sh",
         tool_call_id: "sh",
         status: "success",
         tool_return: "all tests passed\n"
       }))
-      yield* fake.emit(Fake.turnFinished(sessionId))
+      yield* fake.emit(Fake.turnFinished(conversation))
       yield* client.update((u) => u.sessionUpdate === "state_update" && u.state === "idle")
       const terminals = (yield* client.updates).filter((u) => u.sessionUpdate === "terminal_update")
       assert.strictEqual(terminals[0].command, "npm test")
@@ -499,7 +526,9 @@ describe("ACP v2 sessions", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { client, sessionId } = yield* setup(fake)
-      yield* fake.emit(Fake.delta(sessionId, {
+      yield* client.request("session/prompt", { sessionId, prompt: text("plan it") })
+      const conversation = yield* fake.conversation
+      yield* fake.emit(Fake.delta(conversation, {
         message_type: "tool_call_message",
         id: "p",
         tool_call: {

@@ -8,6 +8,8 @@
  * 2. The same prompt, stopped while the subagent runs: the turn must end at once.
  * 3. A model request that fails once: Letta's retry must show as a readable row,
  *    not as T3's "Unsupported ACP update".
+ * 4. Only the threads the smoke test prompted may have Letta conversations: the
+ *    sessions T3 opens to check its providers must leave nothing in Letta.
  *
  * Letta Code runs on its local backend against the scripted model in
  * test/fixtures/scripted-model.mjs, so no Letta account or model provider is
@@ -362,6 +364,22 @@ const retryCheck = Effect.fnUntraced(function*(page: Page, base: string, out: st
   return `the retry showed as "${/Retrying[^\n]*/.exec(text)?.[0].trim()}"`
 })
 
+/** Counts, in lacp's log, the sessions T3 opened and the Letta conversations they created, which only a prompt may do. */
+const conversationCheck = Effect.fnUntraced(function*(logFile: string, prompted: number) {
+  const fs = yield* FileSystem.FileSystem
+  const lines = (yield* fs.readFileString(logFile).pipe(Effect.mapError(fail("read lacp.log")))).split("\n")
+  // lacp's own log messages, from src/agent/Agent.ts.
+  const opened = lines.filter((line) => line.includes("message=\"Opened session ")).length
+  const created = lines.filter((line) => / message="Session \S+ now has Letta conversation /.test(line)).length
+  if (created !== prompted) {
+    return yield* new SmokeFailed({
+      step: "only prompted sessions have conversations",
+      message: `${created} Letta conversations for ${prompted} prompted threads (T3 opened ${opened} sessions)`
+    })
+  }
+  return `T3 opened ${opened} sessions; only the ${prompted} prompted threads created Letta conversations`
+})
+
 // --- main ------------------------------------------------------------------------
 
 const smoke = Effect.gen(function*() {
@@ -393,12 +411,8 @@ const smoke = Effect.gen(function*() {
     ready: /^(\d+)$/,
     out
   })
-  const settings = t3Settings({
-    config,
-    modelUrl: `http://127.0.0.1:${modelPort}/v1`,
-    lettaHome,
-    logFile: path.join(out, "lacp.log")
-  })
+  const logFile = path.join(out, "lacp.log")
+  const settings = t3Settings({ config, modelUrl: `http://127.0.0.1:${modelPort}/v1`, lettaHome, logFile })
   yield* fs.writeFileString(path.join(t3Home, "userdata", "settings.json"), JSON.stringify(settings, null, 2))
 
   const t3Env = { T3CODE_HOME: t3Home, T3CODE_TELEMETRY_ENABLED: "false" }
@@ -419,7 +433,9 @@ const smoke = Effect.gen(function*() {
   const results = yield* Effect.gen(function*() {
     yield* pair(page, pairingUrl)
     yield* finishSetup(page)
-    return [yield* reportCheck(page, base, out), yield* stopCheck(page, base, out), yield* retryCheck(page, base, out)]
+    const checks = [reportCheck, stopCheck, retryCheck]
+    const results = yield* Effect.forEach(checks, (check) => check(page, base, out))
+    return [...results, yield* conversationCheck(logFile, checks.length)]
   }).pipe(Effect.tapError(() => screenshot(page, path.join(out, "failure.png")).pipe(Effect.ignore)))
   for (const result of results) yield* Console.log(`✓ ${result}`)
   yield* Console.log(`Screenshots, lacp.log, t3.log and model.log are in ${out}`)

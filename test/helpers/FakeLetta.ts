@@ -26,6 +26,8 @@ export interface FakeLetta {
   on(type: Command["type"], handler: Handler): Effect.Effect<void>
   /** Waits until a command matching `predicate` has been sent. */
   waitFor(predicate: (command: Command) => boolean): Effect.Effect<Command>
+  /** The conversation `runtime_start` created last (sessions get one with their first prompt). */
+  readonly conversation: Effect.Effect<string>
 }
 
 export const AGENT_ID = "agent-test"
@@ -139,7 +141,7 @@ export const make = Effect.gen(function*() {
   const frames = yield* PubSub.unbounded<Frame>()
   const commands = yield* Ref.make<ReadonlyArray<Command>>([])
   const sent = yield* PubSub.unbounded<Command>()
-  const conversations = { next: 1 }
+  const conversations = { next: 1, created: new Array<string>() }
   /** Model settings per conversation, as Letta would store them. */
   const settings = new Map<string, Record<string, unknown>>()
   const settingsOf = (id: string) => settings.get(id) ?? { reasoning_effort: "medium", context_window_limit: 200_000 }
@@ -158,6 +160,7 @@ export const make = Effect.gen(function*() {
     runtime_start: (command) => {
       const c = command as Extract<Command, { type: "runtime_start" }>
       const id = c.conversation_id ?? `conv-${conversations.next++}`
+      if (c.conversation_id === undefined) conversations.created.push(id)
       return {
         success: true,
         runtime: { agent_id: c.agent_id, conversation_id: id },
@@ -187,7 +190,13 @@ export const make = Effect.gen(function*() {
     },
     agent_retrieve: (command) => ({
       success: true,
-      agent: { id: (command as Extract<Command, { type: "agent_retrieve" }>).agent_id }
+      agent: {
+        id: (command as Extract<Command, { type: "agent_retrieve" }>).agent_id,
+        name: "Test",
+        model: MODEL,
+        model_settings: { reasoning_effort: "medium", context_window_limit: 200_000 },
+        llm_config: { model: "claude", context_window: 200_000 }
+      }
     }),
     create_agent: () => ({ success: true, agent_id: AGENT_ID }),
     conversation_retrieve: (command) => {
@@ -292,7 +301,11 @@ export const make = Effect.gen(function*() {
     commands,
     emit,
     on: (type, handler) => Effect.sync(() => handlers.set(type, handler)),
-    waitFor
+    waitFor,
+    conversation: Effect.suspend(() => {
+      const last = conversations.created.at(-1)
+      return last === undefined ? Effect.die("no conversation has been created") : Effect.succeed(last)
+    })
   }
   return fake
 })

@@ -54,6 +54,7 @@ import {
   GetCwdMapResponse,
   InputAccepted,
   LoopStatus,
+  type PermissionMode,
   QueueUpdate,
   RuntimeExternalToolsUpdateResponse,
   type RuntimeScope,
@@ -69,6 +70,7 @@ import { AGENT_NAME, AGENT_TITLE, VERSION } from "../Version.ts"
 import { AcpClient } from "./Client.ts"
 import { type AgentError, AgentUnavailable, PromptRejected, SessionNotFound, unavailable } from "./Errors.ts"
 import { plainText, slashCommand, toLettaContent } from "./Prompt.ts"
+import { SessionIds } from "./SessionIds.ts"
 import {
   configOptions,
   decodePermissionMode,
@@ -122,6 +124,12 @@ const BUILTIN_COMMANDS: Readonly<Record<string, string>> = {
   "context-limit": "Show or change the context window limit",
   toolset: "Show or switch the agent's toolset"
 }
+
+/** The commands of a session that has no runtime yet to report its own. */
+const builtinCommands: ReadonlyArray<Command> = Object.entries(BUILTIN_COMMANDS).map(([name, description]) => ({
+  name,
+  description
+}))
 
 const decode = <S extends Schema.Codec<unknown, unknown>>(schema: S) => Schema.decodeUnknownOption(schema)
 const decodeStreamDelta = decode(StreamDelta)
@@ -197,14 +205,24 @@ interface Attachment {
 }
 
 interface Session {
+  /**
+   * The ACP session id: the Letta conversation's id for a session opened on
+   * one, lacp's own for a session opened before it had one (see SessionIds).
+   */
   readonly id: string
-  readonly agentId: string
+  /** The Letta agent; a session opened without one gets it with its conversation. */
+  agentId: Option.Option<string>
   cwd: string
   readonly scope: Scope.Closeable
   readonly translator: Translator.Translator
   readonly turnLock: Semaphore.Semaphore
   readonly permissions: FiberSet.FiberSet<void, never>
+  /** The runtime of the session's Letta conversation; none until the session has a conversation. */
   attachment: Option.Option<Attachment>
+  /** Serializes creating the conversation with config changes made meanwhile. */
+  readonly setupLock: Semaphore.Semaphore
+  /** The client has the session's commands and config options (they went out with its setup). */
+  announced: boolean
   /** Model, effort and mode. */
   readonly settings: SessionSettings
   commands: ReadonlyArray<Command>
@@ -273,6 +291,7 @@ export class Agent extends Context.Service<Agent, {
       const settings = yield* Settings
       const client = yield* AcpClient
       const crypto = yield* Crypto
+      const sessionIds = yield* SessionIds
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
@@ -286,10 +305,10 @@ export class Agent extends Context.Service<Agent, {
 
       const connection = appServer.connection.pipe(Effect.mapError(unavailable))
 
-      const targetOf = (session: Session, attachment: Attachment): Target => ({
+      const targetOf = (attachment: Attachment): Target => ({
         connection: attachment.connection,
         runtime: attachment.runtime,
-        conversationId: session.id
+        conversationId: attachment.runtime.conversation_id
       })
 
       const getSession = (sessionId: string) =>
@@ -566,7 +585,8 @@ export class Agent extends Context.Service<Agent, {
           session.commands = commands
           const firstReport = !(yield* Deferred.isDone(session.deviceStatus))
           yield* Deferred.succeed(session.deviceStatus, undefined)
-          if (firstReport) return
+          // A session's first report goes out with its setup, unless the client already has the setup.
+          if (firstReport && !session.announced) return
           if (commandsChanged) yield* emit(session, { _tag: "AvailableCommands", commands })
           const after = configOptions(session.settings)
           if (!Equal.equals(before, after)) yield* emit(session, { _tag: "ConfigOptions", options: after })
@@ -690,6 +710,7 @@ export class Agent extends Context.Service<Agent, {
         readonly conversationId: Option.Option<string>
         readonly cwd: string
         readonly tools: ReadonlyArray<ExternalToolDefinition>
+        readonly mode: Option.Option<PermissionMode>
       }
 
       /** Starts a runtime and subscribes to its frames (before `runtime_start`, so nothing is missed). */
@@ -706,7 +727,7 @@ export class Agent extends Context.Service<Agent, {
                 ? { conversation_id: target.conversationId.value }
                 : { create_conversation: { body: {} } }),
               cwd: target.cwd,
-              ...(Option.isSome(config.permissionMode) ? { mode: config.permissionMode.value } : {}),
+              ...(Option.isSome(target.mode) ? { mode: target.mode.value } : {}),
               client_info: { name: AGENT_NAME, title: AGENT_TITLE, version: VERSION },
               recover_approvals: true,
               force_device_status: true,
@@ -747,17 +768,21 @@ export class Agent extends Context.Service<Agent, {
         yield* watch(session, attachment).pipe(Effect.forkIn(started.scope))
       })
 
-      /** Returns a live attachment, re-attaching after an App Server restart. */
-      const ensureAttached = Effect.fnUntraced(function*(session: Session) {
+      /** Returns a live attachment to the session's conversation, re-attaching after an App Server restart. */
+      const ensureAttached = Effect.fnUntraced(function*(session: Session, current: Attachment) {
         const conn = yield* connection
-        const current = session.attachment
-        if (Option.isSome(current) && current.value.generation === conn.generation) return current.value
+        if (current.generation === conn.generation) return current
         yield* Effect.logInfo(`Re-attaching session ${session.id} to the restarted Letta Code App Server`)
+        const agentId = Option.orElse(session.agentId, () => Option.fromNullishOr(current.runtime.agent_id))
+        if (Option.isNone(agentId)) {
+          return yield* new AgentUnavailable({ message: `Session ${session.id} has no Letta agent`, auth: false })
+        }
         const started = yield* startRuntime(conn, session.scope, {
-          agentId: session.agentId,
-          conversationId: Option.some(session.id),
+          agentId: agentId.value,
+          conversationId: Option.some(current.runtime.conversation_id),
           cwd: session.cwd,
-          tools: yield* session.mcp.tools
+          tools: yield* session.mcp.tools,
+          mode: config.permissionMode
         })
         yield* attach(session, started, conn)
         if (Option.isSome(session.settings.mode) && Option.isNone(config.permissionMode)) {
@@ -772,20 +797,23 @@ export class Agent extends Context.Service<Agent, {
         return Option.getOrThrow(session.attachment)
       })
 
-      const makeSession = Effect.fnUntraced(function*(
-        conn: LettaConnection,
-        scope: Scope.Closeable,
-        mcp: Bridge.McpBridge,
-        mcpServers: ReadonlyArray<McpServerConfig>,
-        agentId: string,
-        cwd: string,
-        started: Effect.Success<ReturnType<typeof startRuntime>>
-      ) {
+      interface SessionInput {
+        readonly id: string
+        readonly agentId: Option.Option<string>
+        readonly cwd: string
+        readonly scope: Scope.Closeable
+        readonly mcp: Bridge.McpBridge
+        readonly mcpServers: ReadonlyArray<McpServerConfig>
+        readonly settings: SessionSettings
+        readonly commands: ReadonlyArray<Command>
+      }
+
+      const makeSession = Effect.fnUntraced(function*(input: SessionInput) {
         const session: Session = {
-          id: started.runtime.conversation_id,
-          agentId,
-          cwd,
-          scope,
+          id: input.id,
+          agentId: input.agentId,
+          cwd: input.cwd,
+          scope: input.scope,
           translator: Translator.make({
             cwd: () => session.cwd,
             path,
@@ -793,24 +821,26 @@ export class Agent extends Context.Service<Agent, {
             externalTool: (name) => session.mcp.describe(name)
           }),
           turnLock: yield* Semaphore.make(1),
-          permissions: yield* Scope.provide(FiberSet.make<void, never>(), scope),
+          permissions: yield* Scope.provide(FiberSet.make<void, never>(), input.scope),
           attachment: Option.none(),
-          settings: initialSettings(started.response, yield* settings.catalog(conn), config.permissionMode),
-          commands: [],
+          setupLock: yield* Semaphore.make(1),
+          announced: false,
+          settings: input.settings,
+          commands: input.commands,
           ownMessages: new Set(),
           abandonedRuns: new Set(),
           backgroundSubagents: new Set(),
           queuedNotifications: 0,
-          mcpServers,
+          mcpServers: input.mcpServers,
           turn: Option.none(),
           foreground: "idle",
           deviceStatus: yield* Deferred.make<void>(),
           localCommand: false,
           approvals: 0,
-          mcp
+          mcp: input.mcp
         }
         sessions.set(session.id, session)
-        yield* mcp.changes.pipe(Stream.runForEach(() => updateTools(session)), Effect.forkIn(scope))
+        yield* input.mcp.changes.pipe(Stream.runForEach(() => updateTools(session)), Effect.forkIn(input.scope))
         return session
       })
 
@@ -839,11 +869,15 @@ export class Agent extends Context.Service<Agent, {
         }
       })
 
-      const setup = (session: Session): SessionSetup => ({
-        sessionId: session.id,
-        configOptions: configOptions(session.settings),
-        commands: session.commands
-      })
+      /** The session's setup for the client, which then has its commands and config options. */
+      const setup = (session: Session): SessionSetup => {
+        session.announced = true
+        return {
+          sessionId: session.id,
+          configOptions: configOptions(session.settings),
+          commands: session.commands
+        }
+      }
 
       /** Follow-up updates sent right after a session is set up. */
       const announce = (session: Session) =>
@@ -928,9 +962,24 @@ export class Agent extends Context.Service<Agent, {
         return Option.some(created.agent_id)
       })
 
+      /** The agent's state, which also confirms that it exists. */
+      const retrieveAgent = (conn: LettaConnection, agentId: string) =>
+        conn.call(
+          (request_id) => ({ type: "agent_retrieve", request_id, agent_id: agentId }),
+          AgentRetrieveResponse,
+          { timeout: "20 seconds" }
+        ).pipe(
+          Effect.mapError(unavailable),
+          Effect.flatMap((response) =>
+            response.agent === null
+              ? Effect.fail(new AgentUnavailable({ message: `Letta has no agent ${agentId}`, auth: false }))
+              : Effect.succeed(response.agent)
+          )
+        )
+
       // --- history ----------------------------------------------------------
 
-      const replay = Effect.fnUntraced(function*(session: Session, conn: LettaConnection) {
+      const replay = Effect.fnUntraced(function*(session: Session, conn: LettaConnection, conversationId: string) {
         const rows: Array<unknown> = []
         let before: string | undefined
         for (let page = 0; page < 10; page++) {
@@ -938,7 +987,7 @@ export class Agent extends Context.Service<Agent, {
             (request_id) => ({
               type: "conversation_messages_list",
               request_id,
-              conversation_id: session.id,
+              conversation_id: conversationId,
               query: { limit: 100, order: "desc", ...(before === undefined ? {} : { before }) }
             }),
             ConversationMessagesListResponse,
@@ -961,70 +1010,161 @@ export class Agent extends Context.Service<Agent, {
       // --- operations -------------------------------------------------------
 
       /**
-       * Opens a session in a new scope: Letta and the client's MCP servers
-       * connect concurrently, `pick` chooses the agent and conversation, and the
-       * runtime starts with the MCP tools. Replayed history comes before the
-       * session goes live. The scope is closed again if opening fails.
+       * Opens a session that has no Letta conversation yet, without touching
+       * Letta beyond reading the agent and its models: the conversation (and,
+       * where none is set up, the agent) is created by the first prompt.
        */
-      const openSession = <P extends { readonly agentId: string; readonly conversationId: Option.Option<string> }, E>(
-        input: { readonly cwd: string; readonly mcpServers: ReadonlyArray<McpServerConfig>; readonly replay: boolean },
-        pick: (conn: LettaConnection) => Effect.Effect<P, E>
-      ) =>
-        Effect.gen(function*() {
-          const scope = yield* Scope.fork(layerScope)
-          return yield* Effect.gen(function*() {
-            const [conn, mcp] = yield* Effect.all([connection, connectMcp(input.mcpServers, input.cwd, scope)], {
-              concurrency: "unbounded"
-            })
-            const picked = yield* pick(conn)
-            const started = yield* startRuntime(conn, scope, {
-              agentId: picked.agentId,
-              conversationId: picked.conversationId,
-              cwd: input.cwd,
-              tools: yield* mcp.tools
-            })
-            const session = yield* makeSession(conn, scope, mcp, input.mcpServers, picked.agentId, input.cwd, started)
-            if (input.replay) yield* replay(session, conn)
-            yield* attach(session, started, conn)
-            const attachment = Option.getOrThrow(session.attachment)
-            yield* settle(session, attachment)
-            return { session, attachment, mcp, picked }
-          }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
+      const openPending = Effect.fnUntraced(function*(input: {
+        readonly sessionId: string
+        readonly cwd: string
+        readonly mcpServers: ReadonlyArray<McpServerConfig>
+      }) {
+        const scope = yield* Scope.fork(layerScope)
+        return yield* Effect.gen(function*() {
+          const [conn, mcp] = yield* Effect.all([connection, connectMcp(input.mcpServers, input.cwd, scope)], {
+            concurrency: "unbounded"
+          })
+          const agentId = yield* resolveAgent(conn, input.cwd, false)
+          const [agent, models] = yield* Effect.all([
+            Option.match(agentId, {
+              onNone: () => Effect.succeedNone,
+              onSome: (id) => retrieveAgent(conn, id).pipe(Effect.asSome)
+            }),
+            settings.catalog(conn)
+          ], { concurrency: "unbounded" })
+          const session = yield* makeSession({
+            id: input.sessionId,
+            agentId,
+            cwd: input.cwd,
+            scope,
+            mcp,
+            mcpServers: input.mcpServers,
+            settings: initialSettings(
+              { agent: Option.getOrNull(agent) },
+              models,
+              Option.orElse(config.permissionMode, () => Option.some<PermissionMode>("standard"))
+            ),
+            commands: builtinCommands
+          })
+          yield* settings.preferConfiguredModel(session.settings)
+          return session
+        }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
+      })
+
+      /**
+       * Returns a live attachment to the session's conversation, creating the
+       * conversation (and the agent, for a session without one) on first use.
+       * The model, effort and mode chosen meanwhile are applied to it.
+       */
+      const materialize = (session: Session) =>
+        Option.match(session.attachment, {
+          onSome: (attachment) => ensureAttached(session, attachment),
+          onNone: () => Semaphore.withPermits(session.setupLock, 1)(createConversation(session))
         })
+
+      const createConversation = Effect.fnUntraced(function*(session: Session) {
+        if (Option.isSome(session.attachment)) return yield* ensureAttached(session, session.attachment.value)
+        const before = configOptions(session.settings)
+        const conn = yield* connection
+        const agentId = Option.isSome(session.agentId)
+          ? session.agentId.value
+          : Option.getOrThrow(yield* resolveAgent(conn, session.cwd, true))
+        const started = yield* startRuntime(conn, session.scope, {
+          agentId,
+          conversationId: Option.none(),
+          cwd: session.cwd,
+          tools: yield* session.mcp.tools,
+          mode: session.settings.mode
+        })
+        const conversationId = started.runtime.conversation_id
+        session.agentId = Option.some(agentId)
+        yield* attach(session, started, conn)
+        const attachment = Option.getOrThrow(session.attachment)
+        yield* settings.realize(
+          session.settings,
+          targetOf(attachment),
+          initialSettings(started.response, session.settings.models, session.settings.mode)
+        )
+        yield* settle(session, attachment)
+        yield* sessionIds.record(session.id, conversationId)
+        yield* Effect.logInfo(`Session ${session.id} now has Letta conversation ${conversationId} (agent ${agentId})`)
+        const after = configOptions(session.settings)
+        if (!Equal.equals(before, after)) yield* emit(session, { _tag: "ConfigOptions", options: after })
+        return attachment
+      })
+
+      /**
+       * Opens a session on a stored conversation in a new scope: Letta and the
+       * client's MCP servers connect concurrently, then the runtime starts with
+       * the MCP tools. Replayed history comes before the session goes live. The
+       * scope is closed again if opening fails.
+       */
+      const openSession = Effect.fnUntraced(function*(input: {
+        readonly sessionId: string
+        readonly conversationId: string
+        readonly cwd: string
+        readonly mcpServers: ReadonlyArray<McpServerConfig>
+        readonly replay: boolean
+      }) {
+        const scope = yield* Scope.fork(layerScope)
+        return yield* Effect.gen(function*() {
+          const [conn, mcp] = yield* Effect.all([connection, connectMcp(input.mcpServers, input.cwd, scope)], {
+            concurrency: "unbounded"
+          })
+          const stored = yield* storedConversation(conn, input.sessionId, input.conversationId, input.cwd)
+          const started = yield* startRuntime(conn, scope, {
+            agentId: stored.agentId,
+            conversationId: Option.some(input.conversationId),
+            cwd: input.cwd,
+            tools: yield* mcp.tools,
+            mode: config.permissionMode
+          })
+          const session = yield* makeSession({
+            id: input.sessionId,
+            agentId: Option.some(stored.agentId),
+            cwd: input.cwd,
+            scope,
+            mcp,
+            mcpServers: input.mcpServers,
+            settings: initialSettings(started.response, yield* settings.catalog(conn), config.permissionMode),
+            commands: []
+          })
+          if (input.replay) yield* replay(session, conn, input.conversationId)
+          yield* attach(session, started, conn)
+          yield* settle(session, Option.getOrThrow(session.attachment))
+          return { session, conversation: stored.conversation }
+        }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
+      })
 
       const newSession = Effect.fn("Agent.newSession")(function*(input: {
         readonly cwd: string
         readonly mcpServers: ReadonlyArray<McpServerConfig>
       }) {
-        const { attachment, mcp, session } = yield* openSession(
-          { ...input, replay: false },
-          (conn) =>
-            resolveAgent(conn, input.cwd, true).pipe(
-              Effect.map((agentId) => ({ agentId: Option.getOrThrow(agentId), conversationId: Option.none<string>() }))
-            )
-        )
-        yield* settings.applyConfiguredModel(session.settings, targetOf(session, attachment))
+        const session = yield* openPending({ ...input, sessionId: yield* sessionIds.make })
         yield* announce(session)
         yield* Effect.logInfo(
-          `Started session ${session.id} (agent ${session.agentId}) in ${input.cwd}` +
-            (mcp.connected.length > 0 ? ` with MCP servers: ${mcp.connected.join(", ")}` : "")
+          `Opened session ${session.id}` +
+            Option.match(session.agentId, { onNone: () => "", onSome: (id) => ` (agent ${id})` }) +
+            ` in ${input.cwd}` +
+            (session.mcp.connected.length > 0 ? ` with MCP servers: ${session.mcp.connected.join(", ")}` : "") +
+            "; Letta creates its conversation with the first prompt"
         )
         return setup(session)
       })
 
-      /** The stored conversation behind a session id, and its agent. */
-      const storedConversation = (conn: LettaConnection, sessionId: string, cwd: string) =>
+      /** The stored conversation behind a session, and its agent. */
+      const storedConversation = (conn: LettaConnection, sessionId: string, conversationId: string, cwd: string) =>
         Effect.gen(function*() {
           const notFound = new SessionNotFound({ sessionId })
           const retrieved = yield* conn.call(
-            (request_id) => ({ type: "conversation_retrieve", request_id, conversation_id: sessionId }),
+            (request_id) => ({ type: "conversation_retrieve", request_id, conversation_id: conversationId }),
             ConversationRetrieveResponse
           ).pipe(Effect.mapError(() => notFound))
           const conversation = retrieved.conversation
           if (conversation === null) return yield* notFound
           const agentId = conversation.agent_id ?? Option.getOrUndefined(yield* resolveAgent(conn, cwd, false))
           if (agentId === undefined) return yield* notFound
-          return { agentId, conversationId: Option.some(sessionId), conversation }
+          return { agentId, conversation }
         })
 
       const loadSession = Effect.fn("Agent.loadSession")(function*(input: {
@@ -1040,16 +1180,23 @@ export class Agent extends Context.Service<Agent, {
           : undefined
         if (open !== undefined && existing === undefined) yield* closeSession(open.id)
         if (existing !== undefined) {
-          const conn = yield* connection
-          yield* ensureAttached(existing)
-          if (input.replay) yield* replay(existing, conn)
+          if (Option.isSome(existing.attachment)) {
+            const attachment = yield* ensureAttached(existing, existing.attachment.value)
+            if (input.replay) yield* replay(existing, attachment.connection, attachment.runtime.conversation_id)
+          }
           yield* announce(existing)
           return setup(existing)
         }
-        const { picked: { conversation }, session } = yield* openSession(
-          input,
-          (conn) => storedConversation(conn, input.sessionId, input.cwd)
-        )
+        const conversationId = sessionIds.isProvisional(input.sessionId)
+          ? yield* sessionIds.conversationOf(input.sessionId)
+          : Option.some(input.sessionId)
+        if (Option.isNone(conversationId)) {
+          // A session that never had a prompt: there is nothing to replay, and still no conversation.
+          const session = yield* openPending(input)
+          yield* announce(session)
+          return setup(session)
+        }
+        const { conversation, session } = yield* openSession({ ...input, conversationId: conversationId.value })
         const title = conversation.summary ?? conversation.description
         if (title !== undefined && title !== null && title !== "") {
           yield* emit(session, {
@@ -1088,25 +1235,29 @@ export class Agent extends Context.Service<Agent, {
           Effect.map((r) => r.cwd_map ?? {}),
           Effect.orElseSucceed((): Record<string, string> => ({}))
         )
-        const summaries = response.conversations
-          .filter((c) => c.archived !== true)
-          .map((c): SessionSummary & { readonly mapped: boolean } => {
-            const mapped = cwdMap[`conversation:${c.id}`] ?? sessions.get(c.id)?.cwd
-            return {
-              sessionId: c.id,
-              cwd: mapped ?? host.cwd,
-              mapped: mapped !== undefined,
-              title: Option.fromNullishOr(c.summary ?? c.description).pipe(Option.filter((t) => t !== "")),
-              updatedAt: Option.fromNullishOr(c.last_message_at ?? c.updated_at ?? c.created_at)
-            }
-          })
-          .filter((s) =>
-            Option.isNone(input.cwd) || (s.mapped && path.resolve(s.cwd) === path.resolve(input.cwd.value))
-          )
-          .map(({ mapped: _mapped, ...summary }) => summary)
+        const summaries = yield* Effect.forEach(
+          response.conversations.filter((c) => c.archived !== true),
+          (c) =>
+            // A conversation created for a session lacp opened first is listed under that session's id.
+            sessionIds.sessionOf(c.id).pipe(Effect.map((sessionId) => {
+              const id = Option.getOrElse(sessionId, () => c.id)
+              const mapped = cwdMap[`conversation:${c.id}`] ?? sessions.get(id)?.cwd
+              return {
+                sessionId: id,
+                cwd: mapped ?? host.cwd,
+                mapped: mapped !== undefined,
+                title: Option.fromNullishOr(c.summary ?? c.description).pipe(Option.filter((t) => t !== "")),
+                updatedAt: Option.fromNullishOr(c.last_message_at ?? c.updated_at ?? c.created_at)
+              }
+            }))
+        )
         const last = response.conversations.at(-1)
         return {
-          sessions: summaries,
+          sessions: summaries
+            .filter((s) =>
+              Option.isNone(input.cwd) || (s.mapped && path.resolve(s.cwd) === path.resolve(input.cwd.value))
+            )
+            .map(({ mapped: _mapped, ...summary }): SessionSummary => summary),
           nextCursor: response.conversations.length >= limit && last !== undefined
             ? Option.some(last.id)
             : Option.none()
@@ -1174,7 +1325,7 @@ export class Agent extends Context.Service<Agent, {
         yield* Effect.interruptible(Semaphore.take(session.turnLock, 1))
         const release = Semaphore.release(session.turnLock, 1).pipe(Effect.asVoid)
         return yield* Effect.gen(function*() {
-          const attachment = yield* ensureAttached(session)
+          const attachment = yield* materialize(session)
           const command = slashCommand(plainText(blocks), session.commands)
           if (Option.isSome(command)) return yield* runCommand(session, attachment, blocks, command.value, release)
 
@@ -1274,8 +1425,16 @@ export class Agent extends Context.Service<Agent, {
       const setConfigOption = Effect.fn("Agent.setConfigOption")(
         function*(sessionId: string, configId: string, value: string) {
           const session = yield* getSession(sessionId)
-          const attachment = yield* ensureAttached(session)
-          yield* settings.set(session.settings, targetOf(session, attachment), configId, value)
+          // Without a conversation yet, the choice is kept until the first prompt creates one.
+          yield* Semaphore.withPermits(session.setupLock, 1)(Effect.suspend(() =>
+            Option.match(session.attachment, {
+              onNone: () => settings.choose(session.settings, configId, value),
+              onSome: (current) =>
+                ensureAttached(session, current).pipe(
+                  Effect.flatMap((attachment) => settings.set(session.settings, targetOf(attachment), configId, value))
+                )
+            })
+          ))
           const options = configOptions(session.settings)
           yield* emit(session, { _tag: "ConfigOptions", options })
           return options

@@ -24,6 +24,7 @@ src/
 │   ├── AcpServer.ts      initialize negotiation; v1 and v2 method sets over the core
 │   ├── Agent.ts          the core: sessions ⇄ Letta runtimes, turns, approvals, history
 │   ├── Settings.ts       a session's model, effort and mode: config options and applying changes (a service)
+│   ├── SessionIds.ts     lacp's own ids for sessions created before their conversation, and their conversations
 │   ├── Errors.ts         the core's errors, mapped onto JSON-RPC errors by AcpServer
 │   ├── Client.ts         the client port: emit events / request permission on the negotiated surface
 │   └── Prompt.ts         ACP prompt content → Letta message content; slash-command detection
@@ -44,12 +45,30 @@ src/
     └── Bridge.ts         a session's servers as Letta external tools: names, definitions, results
 ```
 
+## Sessions and conversations
+
+`session/new` creates nothing in Letta. It reads the agent (if one is configured or found in the host's Letta
+settings) and the model catalog, and opens a _pending_ session with an id from `SessionIds` (`lacp-<uuid>`), the
+agent's model and effort, the configured permission mode (Standard by default) and Letta's built-in slash
+commands. Changing the model, effort or mode only records the choice. The first prompt then creates the agent (if
+there is none yet) and the conversation, with `runtime_start` (`create_conversation`, the session's mode), applies
+the chosen model and effort to the new conversation, and records the pair in `SessionIds`. The runtime's device
+status then supplies the session's real commands. A session lock serializes this with config changes made
+meanwhile.
+
+`SessionIds` keeps each pair in memory and as two small files in `~/.letta/lacp/sessions` (one per side), so a
+`lacp-` id resumes or loads its conversation in this process or a later one, and `session/list` reports
+conversations under the id they were created for. A `lacp-` id without a conversation reopens as a pending
+session again. Sessions opened on a stored conversation (`session/load`, `session/resume` with a conversation
+id) start their runtime at once.
+
 ## Flow of a prompt
 
 1. The client sends `session/prompt`. `AcpServer` decodes it with the negotiated version's schema and calls
    `Agent.prompt`.
-2. `Agent` takes the session's turn lock (one turn at a time), makes sure the session is attached to the current
-   App Server generation, and sends an `input` command. Once Letta acknowledges it (`input_accepted`), the prompt
+2. `Agent` takes the session's turn lock (one turn at a time), creates the session's conversation if it has none
+   yet (see above) or makes sure it is attached to the current App Server generation, and sends an `input`
+   command. Once Letta acknowledges it (`input_accepted`), the prompt
    is _inserted_: a `UserMessage` event and `State(running)` are emitted and a `PromptHandle` is returned.
    - v2 answers `session/prompt` right away with `{ messageId }`.
    - v1 awaits `handle.completion` and answers with the stop reason.

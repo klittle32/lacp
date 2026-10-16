@@ -4,18 +4,19 @@
  * agent's own requests (permissions) with a configurable policy.
  */
 import { NodeServices } from "@effect/platform-node"
-import { type Cause, Context, Deferred, Effect, Layer, PubSub, Queue, Ref, Schema } from "effect"
+import { type Cause, Context, Deferred, Effect, Layer, Option, PubSub, Queue, Ref, Schema } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { AcpServer } from "../../src/agent/AcpServer.ts"
 import { Agent } from "../../src/agent/Agent.ts"
 import { AcpClient } from "../../src/agent/Client.ts"
+import { SessionIds } from "../../src/agent/SessionIds.ts"
 import { Settings } from "../../src/agent/Settings.ts"
 import { LacpConfig, type LacpConfigShape } from "../../src/Config.ts"
 import { Host, type HostShape } from "../../src/Host.ts"
 import { JsonRpcPeer } from "../../src/jsonrpc/Peer.ts"
 import { Transport } from "../../src/jsonrpc/Transport.ts"
 import { LettaAppServer } from "../../src/letta/AppServer.ts"
-import type { FakeLetta } from "./FakeLetta.ts"
+import { AGENT_ID, type FakeLetta } from "./FakeLetta.ts"
 
 /** What an App Server layer may depend on in tests. */
 type LettaAppServerDeps = LacpConfig | Host | NodeServices.NodeServices
@@ -55,10 +56,10 @@ export const allowOnce: PermissionPolicy = (params) => ({
   outcome: { outcome: "selected", optionId: params.options.find((o: any) => o.kind === "allow_once").optionId }
 })
 
-/** Starts a full server (real AcpServer/Agent/peer) wired to `fake`, and a client for it. */
+/** Starts a full server (real AcpServer/Agent/peer) wired to `fake`, set up (as usual) with an agent to talk to. */
 export const start = (fake: FakeLetta, config: Partial<LacpConfigShape> = {}) =>
   startWith(LettaAppServer.layerConnection(fake.connection, fake.cli), {
-    config,
+    config: { agentId: Option.some(AGENT_ID), ...config },
     host: { home: "/nonexistent-home", cwd: "/work" }
   })
 
@@ -80,6 +81,7 @@ export const startWith = <E>(
     const layer = AcpServer.layer.pipe(
       Layer.provide(Agent.layer),
       Layer.provide(Settings.layer),
+      Layer.provide(SessionIds.layer),
       Layer.provide(FetchHttpClient.layer),
       Layer.provide(appServer),
       Layer.provideMerge(AcpClient.layer),

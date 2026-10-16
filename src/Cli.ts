@@ -17,6 +17,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { AcpServer } from "./agent/AcpServer.ts"
 import { Agent } from "./agent/Agent.ts"
 import { AcpClient } from "./agent/Client.ts"
+import { SessionIds } from "./agent/SessionIds.ts"
 import { Settings } from "./agent/Settings.ts"
 import { type AuthMode, LacpConfig, type LacpConfigShape, type LettaRuntime } from "./Config.ts"
 import { Host } from "./Host.ts"
@@ -173,6 +174,7 @@ const configLayer = (input: Flags) =>
 const ServerLayer = AcpServer.layer.pipe(
   Layer.provide(Agent.layer),
   Layer.provide(Settings.layer),
+  Layer.provide(SessionIds.layer),
   Layer.provide(FetchHttpClient.layer),
   Layer.provide(LettaAppServer.layer),
   Layer.provide(LettaExecutable.layer),

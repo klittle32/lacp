@@ -57,9 +57,9 @@ Letta agent to talk to. Everything can be set through environment variables in y
 | --------------------- | -------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Authentication        | `LACP_AUTH`                | `--auth`                   | `host` (default: whatever your Letta Code uses), `cloud-oauth` (the login from `letta setup`), `api-key` (with `LETTA_API_KEY`), `local` (Letta Code's on-device backend) |
 | API key               | `LETTA_API_KEY`            | —                          | Your Letta API key (for `api-key`)                                                                                                                                        |
-| Agent                 | `LETTA_AGENT_ID`           | `--agent-id`               | A Letta agent id. Default: the agent you last used in that project (as `letta` would), otherwise a new one                                                                |
+| Agent                 | `LETTA_AGENT_ID`           | `--agent-id`               | A Letta agent id. Default: the agent you last used in that project (as `letta` would), otherwise a new one (made with the first prompt)                                   |
 | Model                 | `LACP_MODEL`               | `--model`                  | A model handle for new sessions, e.g. `anthropic/claude-sonnet-4-5`                                                                                                       |
-| Permission mode       | `LACP_PERMISSION_MODE`     | `--permission-mode`        | `standard`, `acceptEdits`, `unrestricted`, `strict`. Default: your Letta Code setting                                                                                     |
+| Permission mode       | `LACP_PERMISSION_MODE`     | `--permission-mode`        | `standard`, `acceptEdits`, `unrestricted`, `strict`. Default: `standard` for new sessions; a reopened session keeps its own                                               |
 | Letta Code executable | `LACP_LETTA_PATH`          | `--letta-path`             | Path to `letta`, if discovery does not find it                                                                                                                            |
 | Letta Code runtime    | `LACP_LETTA_RUNTIME`       | `--letta-runtime`          | `auto` (default), `node` or `bun`: what runs Letta Code. See [Node or Bun](#node-or-bun)                                                                                  |
 | Existing App Server   | `LACP_APP_SERVER_URL`      | `--app-server-url`         | Connect to a running `letta server --listen ws://…` instead of starting one                                                                                               |
@@ -152,8 +152,12 @@ ACP client ──stdio, JSON-RPC (ACP v1 or v2)──▶ lacp ──WebSocket─
                                                  └── spawns and supervises ───────┘
 ```
 
-- Each ACP session is a Letta **conversation** (the session id is the conversation id) on your agent, attached
-  to the App Server as a runtime with the session's working directory.
+- Each ACP session is a Letta **conversation** on your agent, attached to the App Server as a runtime with the
+  session's working directory. A new session gets its conversation with its first prompt, so sessions a client
+  opens and never uses (T3 Code opens one each time it checks its providers) leave nothing behind in Letta. Such a
+  session has an id of `lacp`'s own (`lacp-<uuid>`), which it keeps once its conversation exists: `lacp` records
+  the pair in `~/.letta/lacp/sessions`, so the session lists and resumes under that id. A session opened on an
+  existing conversation (`session/load`, `session/resume`) uses the conversation id.
 - Tool calls run inside Letta Code, with its permission rules. When Letta needs approval, `lacp` asks the editor
   (`session/request_permission`) and forwards the answer, including "always allow" suggestions.
 - Sessions offer three settings, in this order: **Model**, **Effort** and **Mode**.
@@ -165,7 +169,8 @@ ACP client ──stdio, JSON-RPC (ACP v1 or v2)──▶ lacp ──WebSocket─
     Switching models keeps the effort when the new model supports it. Clients show it as a `thought_level`
     setting (T3 Code: the traits menu; Zed: a dropdown next to the model).
   - Modes are Letta Code's permission modes.
-- Slash commands are the App Server's commands plus those contributed by your mods.
+- Slash commands are the App Server's commands plus those contributed by your mods. Until a new session's first
+  prompt starts its runtime, it offers Letta's built-in commands.
 - Background subagents, such as a Codex worker started with the Agent tool, report back in a follow-up turn that
   Letta runs on its own. Clients like T3 Code only show turns they started, so `lacp` keeps a turn open until the
   background subagents it started have reported back, and their report appears in it. Meanwhile the client shows
@@ -222,8 +227,9 @@ LACP_E2E_LETTA="$(command -v letta)" npm test
 A smoke test runs this checkout in a real T3 Code. It installs a T3 Code release (the nightly by default, kept in
 `~/.cache/lacp/t3-smoke`), adds `lacp` as a Local ACP command on Letta Code's local backend with a scripted model,
 and drives T3's web UI in your Chrome. It checks that a background subagent's report appears and the turn ends on
-its own, and that Stop ends a turn waiting for one. Screenshots, `lacp.log` and T3's output go to the directory it
-prints (macOS and Linux):
+its own, that Stop ends a turn waiting for one, that Letta's retries show as readable rows, and that only the
+threads it prompted (not T3's provider checks) created Letta conversations. Screenshots, `lacp.log` and T3's
+output go to the directory it prints (macOS and Linux):
 
 ```sh
 npm run smoke:t3

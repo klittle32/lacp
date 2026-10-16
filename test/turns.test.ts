@@ -54,8 +54,9 @@ describe("turns", () => {
         Effect.forkChild
       )
       yield* fake.waitFor(isInput)
+      const conversation = yield* fake.conversation
       yield* fake.emit(
-        Fake.delta(sessionId, { message_type: "assistant_message", id: "a1", content: "Working", run_id: "run-old" })
+        Fake.delta(conversation, { message_type: "assistant_message", id: "a1", content: "Working", run_id: "run-old" })
       )
       // Letta never confirms the cancellation, so lacp ends the turn itself.
       yield* client.notify("session/cancel", { sessionId })
@@ -65,13 +66,13 @@ describe("turns", () => {
         Effect.forkChild
       )
       yield* Effect.sleep("50 millis")
-      yield* fake.emit(Fake.turnFinished(sessionId, "cancelled", { run_id: "run-old" }))
+      yield* fake.emit(Fake.turnFinished(conversation, "cancelled", { run_id: "run-old" }))
       yield* fake.emit(
-        Fake.delta(sessionId, { message_type: "assistant_message", id: "a2", content: "Late", run_id: "run-old" })
+        Fake.delta(conversation, { message_type: "assistant_message", id: "a2", content: "Late", run_id: "run-old" })
       )
       yield* Effect.sleep("50 millis")
       assert.isUndefined(second.pollUnsafe())
-      yield* fake.emit(Fake.turnFinished(sessionId, "end_turn", { run_id: "run-new" }))
+      yield* fake.emit(Fake.turnFinished(conversation, "end_turn", { run_id: "run-new" }))
       assert.deepStrictEqual((yield* Fiber.join(second)).result, { stopReason: "end_turn" })
       const chunks = (yield* client.updates).filter((u) => u.sessionUpdate === "agent_message_chunk")
       assert.notInclude(chunks.map((u) => u.content.text), "Late")
@@ -86,6 +87,7 @@ describe("turns", () => {
       const sessionId = (yield* client.request("session/new", { cwd: "/work" })).result.sessionId as string
       yield* client.request("session/prompt", { sessionId, prompt: text("think quietly") })
       yield* fake.waitFor(isInput)
+      const conversation = yield* fake.conversation
       yield* client.notify("session/cancel", { sessionId })
       const ended = yield* client.update((u) => u.sessionUpdate === "state_update" && u.state === "idle").pipe(
         Effect.timeout("1 second")
@@ -93,7 +95,7 @@ describe("turns", () => {
       assert.strictEqual(ended.stopReason, "cancelled")
 
       // Letta ends the aborted turn once its silent model request settles; lacp never saw that run.
-      yield* fake.emit(Fake.turnFinished(sessionId, "cancelled", { run_id: "run-unseen" }))
+      yield* fake.emit(Fake.turnFinished(conversation, "cancelled", { run_id: "run-unseen" }))
       yield* Effect.sleep("50 millis")
       const idles = (yield* client.updates).filter((u) => u.sessionUpdate === "state_update" && u.state === "idle")
       assert.strictEqual(idles.length, 1)
@@ -120,7 +122,8 @@ describe("turns", () => {
         Effect.forkChild
       )
       yield* fake.waitFor(isInput)
-      yield* fake.emit(Fake.turnFinished(sessionId))
+      const conversation = yield* fake.conversation
+      yield* fake.emit(Fake.turnFinished(conversation))
       assert.deepStrictEqual((yield* Fiber.join(next)).result, { stopReason: "end_turn" })
     }))
 
@@ -130,11 +133,13 @@ describe("turns", () => {
       const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
       const sessionId = (yield* client.request("session/new", { cwd: "/work" })).result.sessionId as string
+      yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
+      const conversation = yield* fake.conversation
       const resumed = yield* client.request("session/resume", { sessionId, cwd: "/work/worktree" })
       assert.isDefined(resumed.result)
       const starts = (yield* Ref.get(fake.commands)).filter((c) => c.type === "runtime_start") as Array<any>
       assert.deepStrictEqual(starts.map((c) => c.cwd), ["/work", "/work/worktree"])
-      assert.strictEqual(starts[1].conversation_id, sessionId)
+      assert.strictEqual(starts[1].conversation_id, conversation)
     }))
 
   it.live("a session reopened unchanged keeps its runtime", () =>
@@ -143,6 +148,7 @@ describe("turns", () => {
       const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
       const sessionId = (yield* client.request("session/new", { cwd: "/work" })).result.sessionId as string
+      yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
       yield* client.request("session/resume", { sessionId, cwd: "/work" })
       const starts = (yield* Ref.get(fake.commands)).filter((c) => c.type === "runtime_start")
       assert.strictEqual(starts.length, 1)
