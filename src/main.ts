@@ -16,6 +16,7 @@ const HostLive = Layer.succeed(
     env: process.env,
     platform: process.platform,
     execPath: process.execPath,
+    runtime: process.versions["bun"] === undefined ? "node" : "bun",
     cwd: process.cwd(),
     home: homedir()
   })

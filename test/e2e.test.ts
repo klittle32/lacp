@@ -9,7 +9,9 @@
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
 import { Effect, FileSystem, Layer, Option, Path } from "effect"
+import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import type { LettaRuntime } from "../src/Config.ts"
 import { layerWebSocket, LettaAppServer } from "../src/letta/AppServer.ts"
 import { LettaExecutable } from "../src/letta/Executable.ts"
 import { allowOnce, initializeHybrid, initializeV1, startWith } from "./helpers/AcpClient.ts"
@@ -18,43 +20,46 @@ const mcpFixture = fileURLToPath(new URL("./fixtures/mcp-server.mjs", import.met
 
 // oxlint-disable-next-line effecttsgo/process-env -- test-only opt-in switch
 const letta = process.env["LACP_E2E_LETTA"]
+const hasBun = spawnSync("bun", ["--version"]).status === 0
 
 const realLetta = LettaAppServer.layer.pipe(Layer.provide(LettaExecutable.layer), Layer.provide(layerWebSocket))
 
-const startReal = Effect.gen(function*() {
-  const fs = yield* FileSystem.FileSystem
-  const path = yield* Path.Path
-  const home = yield* fs.makeTempDirectoryScoped({ prefix: "lacp-e2e-home-" })
-  const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "lacp-e2e-project-" })
-  const client = yield* startWith(realLetta, {
-    config: {
-      auth: "local",
-      lettaPath: Option.fromUndefinedOr(letta),
-      permissionMode: Option.some("standard")
-    },
-    host: {
-      cwd,
-      home,
-      env: {
-        // oxlint-disable-next-line effecttsgo/process-env -- the child needs the real PATH
-        PATH: process.env["PATH"] ?? "",
-        HOME: home,
-        DISABLE_AUTOUPDATER: "1",
-        LETTA_CODE_TELEM: "0",
-        DO_NOT_TRACK: "1",
-        LETTA_BASE_URL: "http://127.0.0.1:9",
-        LETTA_LOCAL_BACKEND_EXECUTOR: "deterministic-reflection"
+const startReal = (lettaRuntime: LettaRuntime = "node") =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const path = yield* Path.Path
+    const home = yield* fs.makeTempDirectoryScoped({ prefix: "lacp-e2e-home-" })
+    const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "lacp-e2e-project-" })
+    const client = yield* startWith(realLetta, {
+      config: {
+        auth: "local",
+        lettaPath: Option.fromUndefinedOr(letta),
+        lettaRuntime,
+        permissionMode: Option.some("standard")
       },
-      execPath: process.execPath
-    }
+      host: {
+        cwd,
+        home,
+        env: {
+          // oxlint-disable-next-line effecttsgo/process-env -- the child needs the real PATH
+          PATH: process.env["PATH"] ?? "",
+          HOME: home,
+          DISABLE_AUTOUPDATER: "1",
+          LETTA_CODE_TELEM: "0",
+          DO_NOT_TRACK: "1",
+          LETTA_BASE_URL: "http://127.0.0.1:9",
+          LETTA_LOCAL_BACKEND_EXECUTOR: "deterministic-reflection"
+        },
+        execPath: process.execPath
+      }
+    })
+    return { client, cwd, path }
   })
-  return { client, cwd, path }
-})
 
 describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
   it.live("ACP v2: prompt, approval, terminal output, list and resume with replay", () =>
     Effect.gen(function*() {
-      const { client, cwd } = yield* startReal
+      const { client, cwd } = yield* startReal()
       yield* client.setPermissionPolicy(allowOnce)
       const init = yield* client.request("initialize", initializeHybrid)
       assert.strictEqual(init.result.protocolVersion, 2)
@@ -100,7 +105,7 @@ describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
 
   it.live("ACP v2: the client's MCP servers are registered with Letta as external tools", () =>
     Effect.gen(function*() {
-      const { client, cwd } = yield* startReal
+      const { client, cwd } = yield* startReal()
       yield* client.request("initialize", initializeHybrid)
       // Letta validates every tool definition in runtime_start; a rejected one fails session/new.
       const created = yield* client.request("session/new", {
@@ -115,9 +120,21 @@ describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
       assert.isFalse((yield* client.updates).some((u) => u.sessionUpdate === "notice"))
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), 180_000)
 
+  it.live.skipIf(!hasBun)("runs Letta Code under Bun with LACP_LETTA_RUNTIME=bun", () =>
+    Effect.gen(function*() {
+      const { client, cwd } = yield* startReal("bun")
+      yield* client.request("initialize", initializeV1)
+      const created = yield* client.request("session/new", { cwd, mcpServers: [] })
+      const reply = yield* client.request("session/prompt", {
+        sessionId: created.result.sessionId,
+        prompt: [{ type: "text", text: "hello" }]
+      })
+      assert.deepStrictEqual(reply.result, { stopReason: "end_turn" })
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), 180_000)
+
   it.live("ACP v1: session/prompt resolves with end_turn", () =>
     Effect.gen(function*() {
-      const { client, cwd } = yield* startReal
+      const { client, cwd } = yield* startReal()
       yield* client.request("initialize", initializeV1)
       const created = yield* client.request("session/new", { cwd, mcpServers: [] })
       const reply = yield* client.request("session/prompt", {

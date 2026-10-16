@@ -1,9 +1,10 @@
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
-import { Effect, FileSystem, Layer, Option, Path } from "effect"
+import { Effect, FileSystem, Layer, Option, Path, Result } from "effect"
 import { LacpConfig } from "../src/Config.ts"
-import { Host } from "../src/Host.ts"
-import { compareVersions, LettaExecutable, parseVersion } from "../src/letta/Executable.ts"
+import { Host, type HostShape } from "../src/Host.ts"
+import { chooseRuntime, compareVersions, LettaExecutable, parseVersion } from "../src/letta/Executable.ts"
+import * as Login from "../src/letta/Login.ts"
 
 describe("version helpers", () => {
   it("parses `letta --version` output", () => {
@@ -31,14 +32,18 @@ const fakeLetta = (version: string) =>
     return { dir, bin }
   })
 
-const resolveWith = (env: Record<string, string>, config: Parameters<typeof LacpConfig.layerTest>[0] = {}) =>
+const resolveWith = (
+  env: Record<string, string>,
+  config: Parameters<typeof LacpConfig.layerTest>[0] = {},
+  host: Partial<HostShape> = {}
+) =>
   Effect.gen(function*() {
     const executable = yield* LettaExecutable
     return yield* executable.resolve
   }).pipe(
     Effect.provide(LettaExecutable.layer.pipe(
       Layer.provide(LacpConfig.layerTest(config)),
-      Layer.provide(Host.layerTest({ env, home: "/nonexistent-home" }))
+      Layer.provide(Host.layerTest({ env, home: "/nonexistent-home", ...host }))
     ))
   )
 
@@ -51,6 +56,7 @@ describe("LettaExecutable", () => {
       assert.strictEqual(install.command, bin)
       assert.strictEqual(install.version, "0.34.15")
       assert.strictEqual(install.source, "PATH")
+      assert.strictEqual(install.runtime, "launcher")
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
 
   it.live("prefers an explicit path", () =>
@@ -85,5 +91,112 @@ describe("LettaExecutable with a bare command name", () => {
       const install = yield* resolveWith({ PATH: dir }, { lettaPath: Option.some("letta") })
       assert.strictEqual(install.path, bin)
       assert.strictEqual(install.source, "--letta-path")
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+})
+
+describe("chooseRuntime", () => {
+  const node = Option.some("/usr/bin/node")
+  const bun = Option.some("/home/me/.bun/bin/bun")
+  const choose = (input: Partial<Parameters<typeof chooseRuntime>[0]>) =>
+    chooseRuntime({ requested: "auto", platform: "darwin", loginInSettings: false, node, bun, ...input })
+  const runtimeOf = (result: ReturnType<typeof chooseRuntime>) =>
+    Result.match(result, { onSuccess: (choice) => choice.runtime, onFailure: (error) => `error: ${error}` })
+
+  it("keeps Node while the settings file holds the login", () => {
+    assert.strictEqual(runtimeOf(choose({ loginInSettings: true })), "node")
+  })
+
+  it("uses Bun when the login is not in the settings file", () => {
+    assert.strictEqual(runtimeOf(choose({})), "bun")
+    assert.strictEqual(runtimeOf(choose({ bun: Option.none() })), "node")
+  })
+
+  it("prefers Node on Windows", () => {
+    assert.strictEqual(runtimeOf(choose({ platform: "win32" })), "node")
+    assert.strictEqual(runtimeOf(choose({ platform: "win32", node: Option.none() })), "bun")
+  })
+
+  it("falls back to Bun when Node is missing", () => {
+    const result = choose({ loginInSettings: true, node: Option.none() })
+    assert.strictEqual(runtimeOf(result), "bun")
+    assert.include(Result.getOrThrow(result).reason, "Node.js was not found")
+  })
+
+  it("honours an explicit choice, and fails when it is not installed", () => {
+    assert.strictEqual(runtimeOf(choose({ requested: "node" })), "node")
+    assert.strictEqual(runtimeOf(choose({ requested: "bun", loginInSettings: true })), "bun")
+    assert.strictEqual(
+      runtimeOf(choose({ requested: "bun", bun: Option.none() })),
+      "error: LACP_LETTA_RUNTIME is bun, but Bun was not found"
+    )
+  })
+})
+
+/** A `letta.js` (as npm and Bun install it) behind a `letta` symlink, plus a fake `bun` that runs Node. */
+const scriptInstall = Effect.gen(function*() {
+  const fs = yield* FileSystem.FileSystem
+  const path = yield* Path.Path
+  const dir = yield* fs.makeTempDirectoryScoped()
+  const pkg = path.join(dir, "lib", "node_modules", "@letta-ai", "letta-code")
+  yield* fs.makeDirectory(pkg, { recursive: true })
+  const script = path.join(pkg, "letta.js")
+  yield* fs.writeFileString(script, `#!/usr/bin/env node\nconsole.log("0.34.15 (Letta Code)")\n`)
+  const bin = path.join(dir, "bin")
+  yield* fs.makeDirectory(bin)
+  yield* fs.symlink(script, path.join(bin, "letta"))
+  const bun = path.join(bin, "bun")
+  yield* fs.writeFileString(bun, `#!/bin/sh\nexec "${process.execPath}" "$@"\n`)
+  yield* fs.chmod(bun, 0o755)
+  const home = path.join(dir, "home")
+  yield* fs.makeDirectory(path.join(home, ".letta"), { recursive: true })
+  return { bin, bun, home, script: yield* fs.realPath(script) }
+})
+
+describe("LettaExecutable runtimes", () => {
+  const host = (home: string) => ({ home, execPath: process.execPath, runtime: "node" as const })
+
+  it.live("runs letta.js with Bun when the settings file has no login", () =>
+    Effect.gen(function*() {
+      const { bin, bun, home, script } = yield* scriptInstall
+      const install = yield* resolveWith({ PATH: bin, HOME: home }, {}, host(home))
+      assert.strictEqual(install.runtime, "bun")
+      assert.strictEqual(install.command, bun)
+      assert.deepStrictEqual(install.prefixArgs, [script])
+      assert.strictEqual(install.version, "0.34.15")
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
+  it.live("keeps Node while ~/.letta/settings.json holds the login", () =>
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      const { bin, home, script } = yield* scriptInstall
+      yield* fs.writeFileString(`${home}/.letta/settings.json`, JSON.stringify({ refreshToken: "rt" }))
+      const install = yield* resolveWith({ PATH: bin, HOME: home }, {}, host(home))
+      assert.strictEqual(install.runtime, "node")
+      assert.strictEqual(install.command, process.execPath)
+      assert.deepStrictEqual(install.prefixArgs, [script])
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
+  it.live("honours LACP_LETTA_RUNTIME=node", () =>
+    Effect.gen(function*() {
+      const { bin, home } = yield* scriptInstall
+      const install = yield* resolveWith({ PATH: bin, HOME: home }, { lettaRuntime: "node" }, host(home))
+      assert.strictEqual(install.runtime, "node")
+      assert.strictEqual(install.runtimeReason, "LACP_LETTA_RUNTIME=node")
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+})
+
+describe("Login.inSettingsFile", () => {
+  it.live("finds a refresh token or an API key, and nothing else", () =>
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      const home = yield* fs.makeTempDirectoryScoped()
+      yield* fs.makeDirectory(`${home}/.letta`)
+      const withSettings = (text: string) =>
+        fs.writeFileString(`${home}/.letta/settings.json`, text).pipe(Effect.andThen(Login.inSettingsFile(home)))
+      assert.isTrue(yield* withSettings(JSON.stringify({ refreshToken: "rt", lastAgent: "agent-1" })))
+      assert.isTrue(yield* withSettings(JSON.stringify({ env: { LETTA_API_KEY: "sk-let" } })))
+      assert.isFalse(yield* withSettings(JSON.stringify({ refreshToken: "", env: { OTHER: "x" } })))
+      assert.isFalse(yield* withSettings("not json"))
+      assert.isFalse(yield* Login.inSettingsFile("/nonexistent-home"))
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
 })

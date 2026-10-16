@@ -18,6 +18,18 @@ import type { PermissionMode } from "./letta/Protocol.ts"
 export const AuthMode = Schema.Literals(["host", "cloud-oauth", "api-key", "local"])
 export type AuthMode = typeof AuthMode.Type
 
+/**
+ * Which JavaScript runtime runs Letta Code.
+ *
+ * It matters because Letta Code keeps its Letta Cloud login in the system
+ * keychain only when it runs under Bun (`Bun.secrets`); under Node it uses
+ * `~/.letta/settings.json`. Bun also moves a login it finds in that file into
+ * the keychain. `auto` therefore follows the login: Node while the settings
+ * file holds it, otherwise Bun when it is installed.
+ */
+export const LettaRuntime = Schema.Literals(["auto", "node", "bun"])
+export type LettaRuntime = typeof LettaRuntime.Type
+
 /** The highest ACP protocol version this server will negotiate. */
 export const AcpVersion = Schema.Literals(["1", "2"])
 export type AcpVersion = typeof AcpVersion.Type
@@ -33,6 +45,8 @@ export interface LacpConfigShape {
   readonly permissionMode: Option.Option<PermissionMode>
   /** Explicit `letta` executable, bypassing discovery. */
   readonly lettaPath: Option.Option<string>
+  /** The runtime for Letta Code's `letta.js`. */
+  readonly lettaRuntime: LettaRuntime
   /** Connect to an already-running App Server instead of spawning one. */
   readonly appServerUrl: Option.Option<string>
   readonly maxAcpVersion: 1 | 2
@@ -47,6 +61,7 @@ export class LacpConfig extends Context.Service<LacpConfig, LacpConfigShape>()("
     model: Option.none(),
     permissionMode: Option.none(),
     lettaPath: Option.none(),
+    lettaRuntime: "auto",
     appServerUrl: Option.none(),
     maxAcpVersion: 2,
     startupTimeout: Duration.seconds(60)

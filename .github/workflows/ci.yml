@@ -33,6 +33,7 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+      - uses: oven-sh/setup-bun@v2
       - run: npm ci
       - run: npm install -g @letta-ai/letta-code
       - run: npx vitest run test/e2e.test.ts

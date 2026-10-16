@@ -17,11 +17,13 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { AcpServer } from "./agent/AcpServer.ts"
 import { Agent } from "./agent/Agent.ts"
 import { AcpClient } from "./agent/Client.ts"
-import { type AuthMode, LacpConfig, type LacpConfigShape } from "./Config.ts"
+import { type AuthMode, LacpConfig, type LacpConfigShape, type LettaRuntime } from "./Config.ts"
+import { Host } from "./Host.ts"
 import { JsonRpcPeer } from "./jsonrpc/Peer.ts"
 import { Transport } from "./jsonrpc/Transport.ts"
 import { layerWebSocket, LettaAppServer } from "./letta/AppServer.ts"
-import { LettaExecutable } from "./letta/Executable.ts"
+import { LettaExecutable, type LettaInstall } from "./letta/Executable.ts"
+import * as Login from "./letta/Login.ts"
 import { ListModelsResponse, type PermissionMode } from "./letta/Protocol.ts"
 import { VERSION } from "./Version.ts"
 
@@ -38,6 +40,7 @@ export class SetupFailed extends Schema.TaggedError<SetupFailed, { readonly bran
 const AUTH_MODES = ["host", "cloud-oauth", "api-key", "local"] as const
 const PERMISSION_MODES = ["standard", "acceptEdits", "unrestricted", "strict"] as const
 const ACP_VERSIONS = ["1", "2"] as const
+const LETTA_RUNTIMES = ["auto", "node", "bun"] as const
 
 const flags = {
   auth: Flag.Literals("auth", AUTH_MODES).pipe(
@@ -68,6 +71,14 @@ const flags = {
     Flag.withFallbackConfig(Config.String("LACP_LETTA_PATH")),
     Flag.optional
   ),
+  lettaRuntime: Flag.Literals("letta-runtime", LETTA_RUNTIMES).pipe(
+    Flag.withDescription(
+      "Runtime for Letta Code: auto (Node while ~/.letta/settings.json holds your login, else Bun if installed), " +
+        "node, or bun. Letta Code keeps its login in the system keychain only under Bun. Env: LACP_LETTA_RUNTIME"
+    ),
+    Flag.withFallbackConfig(Config.Literals(LETTA_RUNTIMES, "LACP_LETTA_RUNTIME")),
+    Flag.withDefault<LettaRuntime>("auto")
+  ),
   appServerUrl: Flag.String("app-server-url").pipe(
     Flag.withDescription(
       "Connect to a running `letta server --listen` instead of starting one. Env: LACP_APP_SERVER_URL"
@@ -95,6 +106,7 @@ type Flags = {
   readonly model: Option.Option<string>
   readonly permissionMode: Option.Option<PermissionMode>
   readonly lettaPath: Option.Option<string>
+  readonly lettaRuntime: LettaRuntime
   readonly appServerUrl: Option.Option<string>
   readonly acpVersion: "1" | "2"
   readonly startupTimeout: number
@@ -116,6 +128,7 @@ const configLayer = (input: Flags) =>
         model: input.model,
         permissionMode: input.permissionMode,
         lettaPath: input.lettaPath,
+        lettaRuntime: input.lettaRuntime,
         appServerUrl: input.appServerUrl,
         maxAcpVersion: input.acpVersion === "1" ? 1 : 2,
         startupTimeout: Duration.seconds(input.startupTimeout)
@@ -175,6 +188,36 @@ const setup = Command.make("setup", {}, () =>
     Command.provide(() => LettaExecutable.layer.pipe(Layer.provide(rootConfig)))
   )
 
+/** Where Letta Code's login lives, and whether the chosen runtime can read it. */
+const loginReport = Effect.fnUntraced(function*(auth: AuthMode, runtime: LettaInstall["runtime"]) {
+  if (auth === "api-key") return ["login: LETTA_API_KEY from the environment"]
+  if (auth === "local") return ["login: not needed (local backend)"]
+  const host = yield* Host
+  const inFile = yield* Login.inSettingsFile(host.env["HOME"] ?? host.home)
+  const keychain = Option.getOrUndefined(yield* Login.inKeychain(host.platform))
+  const where = inFile && keychain === true
+    ? "in ~/.letta/settings.json and in the macOS keychain"
+    : inFile
+    ? "in ~/.letta/settings.json (Letta Code reads it there under Node)"
+    : keychain === true
+    ? "in the macOS keychain (Letta Code reads it there under Bun)"
+    : keychain === false
+    ? "none found in ~/.letta/settings.json or the macOS keychain; run `lacp setup`"
+    : "not in ~/.letta/settings.json (it may be in the system keychain, which Letta Code reads only under Bun)"
+  return [
+    `login: ${where}`,
+    ...(runtime === "node" && !inFile && keychain === true
+      ? ["warning: Letta Code under Node cannot read the keychain; set LACP_LETTA_RUNTIME=bun (or auto)"]
+      : []),
+    ...(runtime === "bun" && inFile
+      ? [
+        "note: Letta Code under Bun moves this login into the system keychain, where Letta Code under Node " +
+        "no longer finds it"
+      ]
+      : [])
+  ]
+})
+
 const doctor = Command.make("doctor", {}, () =>
   Effect.gen(function*() {
     const config = yield* LacpConfig
@@ -187,6 +230,12 @@ const doctor = Command.make("doctor", {}, () =>
     if (Option.isNone(config.appServerUrl)) {
       const install = yield* executable.resolve
       yield* Console.log(`letta: ${install.path} (${install.version}, found via ${install.source})`)
+      yield* Console.log(
+        install.runtime === "launcher"
+          ? `runtime: the launcher itself (${install.runtimeReason})`
+          : `runtime: ${install.runtime} (${install.command}): ${install.runtimeReason}`
+      )
+      for (const line of yield* loginReport(config.auth, install.runtime)) yield* Console.log(line)
     } else {
       yield* Console.log(`app server: ${config.appServerUrl.value}`)
     }

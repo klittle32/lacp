@@ -21,6 +21,7 @@ as they are in your terminal.
 ## Requirements
 
 - Node.js 22.19 or newer
+- Optionally [Bun](https://bun.sh), if you run Letta Code with it (see [Node or Bun](#node-or-bun))
 - Letta Code 0.30 or newer, installed globally:
 
   ```sh
@@ -59,12 +60,29 @@ Letta agent to talk to. Everything can be set through environment variables in y
 | Model                 | `LACP_MODEL`           | `--model`           | A model handle for new sessions, e.g. `anthropic/claude-sonnet-4-5`                                                                                                       |
 | Permission mode       | `LACP_PERMISSION_MODE` | `--permission-mode` | `standard`, `acceptEdits`, `unrestricted`, `strict`. Default: your Letta Code setting                                                                                     |
 | Letta Code executable | `LACP_LETTA_PATH`      | `--letta-path`      | Path to `letta`, if discovery does not find it                                                                                                                            |
+| Letta Code runtime    | `LACP_LETTA_RUNTIME`   | `--letta-runtime`   | `auto` (default), `node` or `bun`: what runs Letta Code. See [Node or Bun](#node-or-bun)                                                                                  |
 | Existing App Server   | `LACP_APP_SERVER_URL`  | `--app-server-url`  | Connect to a running `letta server --listen ws://…` instead of starting one                                                                                               |
 | ACP version           | `LACP_ACP_VERSION`     | `--acp-version`     | `2` (default: negotiate v1 or v2) or `1` (never negotiate the v2 draft)                                                                                                   |
 | Startup timeout       | `LACP_STARTUP_TIMEOUT` | `--startup-timeout` | Seconds to wait for the App Server (default `60`)                                                                                                                         |
 | Log level             | `LACP_LOG_LEVEL`       | `--log-level`       | `debug`, `info` (default), `warn`, … Logs go to stderr                                                                                                                    |
 
 Self-hosted Letta servers work through Letta Code's own `LETTA_BASE_URL` setting.
+
+### Node or Bun
+
+Letta Code keeps your Letta Cloud login in a different place depending on what runs it. Under **Bun** it is in the
+system keychain (the macOS Keychain); under **Node** it is in `~/.letta/settings.json`. Bun also moves a login it
+finds in that file into the keychain, after which Letta Code under Node no longer sees it. So `lacp` runs Letta
+Code's `letta.js` with the runtime that can see your login:
+
+- `auto` (default): Node while `~/.letta/settings.json` holds your login, otherwise Bun when it is installed. On
+  Windows, always Node.
+- `node` or `bun`: always that runtime.
+
+`lacp doctor` shows the runtime it picked, why, and where your login is. `lacp` itself runs on Node either way; this
+setting only decides what runs Letta Code. It applies when `letta` is an npm or Bun install (a link to `letta.js`).
+For other launchers (Volta or pnpm shims, `letta.cmd` on Windows), set `LACP_LETTA_PATH` to the `letta.js` file to
+choose the runtime.
 
 ### Zed
 

@@ -10,8 +10,10 @@ export interface HostShape {
   /** The full environment the agent server was launched with. */
   readonly env: Readonly<Record<string, string | undefined>>
   readonly platform: string
-  /** The Node executable running this program (used to run a `letta.js` path). */
+  /** The executable running this program (Node or Bun). */
   readonly execPath: string
+  /** Which runtime `execPath` is. */
+  readonly runtime: "node" | "bun"
   readonly cwd: string
   readonly home: string
 }
@@ -24,6 +26,7 @@ export class Host extends Context.Service<Host, HostShape>()("lacp/Host") {
         env: {},
         platform: "linux",
         execPath: "/usr/bin/node",
+        runtime: "node",
         cwd: "/work",
         home: "/home/test",
         ...overrides

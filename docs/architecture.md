@@ -26,7 +26,8 @@ src/
 │   ├── Client.ts         the client port: emit events / request permission on the negotiated surface
 │   └── Prompt.ts         ACP prompt content → Letta message content; slash-command detection
 ├── letta/
-│   ├── Executable.ts     finds and validates the host's `letta`
+│   ├── Executable.ts     finds and validates the host's `letta`; picks Node or Bun for `letta.js`
+│   ├── Login.ts          where Letta Code's login lives (settings file or keychain)
 │   ├── AppServer.ts      spawns `letta server --listen`, WebSocket client, request correlation, restarts
 │   ├── Protocol.ts       schemas for App Server commands and frames
 │   ├── Translator.ts     stream deltas / history rows → domain events
@@ -62,12 +63,15 @@ echoes it, so a `turn_finished` for the earlier work cannot end the new turn.
 
 ## The Letta connection
 
-`LettaAppServer` owns one connection at a time. The first use resolves the host's `letta` (`LettaExecutable`),
-spawns `letta [--backend …] server --listen ws://127.0.0.1:0` with the host's environment (minus ambient Letta
-session variables) and connects over WebSocket (`effect/socket`). Responses are correlated by `request_id`; all
-other frames are published to a `PubSub` that sessions subscribe to _before_ starting their runtime, so no replayed
-state is missed. If the process exits or the socket drops, active turns end with an error and the next use starts
-a new App Server; sessions see the new `generation` and re-attach their runtimes.
+`LettaAppServer` owns one connection at a time. The first use resolves the host's `letta` (`LettaExecutable`).
+When that is a link to `letta.js`, the script is run with Node or Bun (`LACP_LETTA_RUNTIME`): Letta Code keeps its
+login in the system keychain only under Bun and in `~/.letta/settings.json` under Node, so `auto` follows the
+login (`letta/Login.ts`), with Node on Windows. It then spawns `letta [--backend …] server --listen
+ws://127.0.0.1:0` with the host's environment (minus ambient Letta session variables) and connects over WebSocket
+(`effect/socket`). Responses are correlated by `request_id`; all other frames are published to a `PubSub` that
+sessions subscribe to _before_ starting their runtime, so no replayed state is missed. If the process exits or the
+socket drops, active turns end with an error and the next use starts a new App Server; sessions see the new
+`generation` and re-attach their runtimes.
 
 ## Client MCP servers
 
