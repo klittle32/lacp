@@ -25,7 +25,9 @@ describe("initialize", () => {
       const reply = yield* client.request("initialize", initializeHybrid)
       assert.strictEqual(reply.result.protocolVersion, 2)
       assert.strictEqual(reply.result.info.name, "lacp")
-      assert.deepStrictEqual(reply.result.capabilities, { session: { prompt: { image: {}, embeddedContext: {} } } })
+      assert.deepStrictEqual(reply.result.capabilities, {
+        session: { prompt: { image: {}, embeddedContext: {} }, mcp: { stdio: {}, http: {} } }
+      })
       assert.isUndefined(reply.result.agentInfo)
     }))
 

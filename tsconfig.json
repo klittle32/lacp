@@ -37,6 +37,7 @@
           "effect/process",
           "effect/socket",
           "effect/encoding",
+          "effect/http",
           "effect/cli",
           "effect/testing"
         ],

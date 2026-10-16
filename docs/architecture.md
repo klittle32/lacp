@@ -13,10 +13,11 @@ src/
 │   ├── JsonRpc.ts        wire schemas, error codes, RpcError
 │   ├── Method.ts         typed method descriptors, handlers, dispatchers
 │   ├── Transport.ts      NDJSON over stdio (single writer fiber) / in-memory queues for tests
-│   └── Peer.ts           bidirectional peer: requests both ways, batches, $/cancel_request
+│   └── Peer.ts           bidirectional peer: requests both ways, batches, cancellation (ACP or MCP style)
 ├── acp/                  the ACP wire formats
 │   ├── Content.ts        shared content blocks and small types
 │   ├── V1.ts, V2.ts      method descriptors and schemas per protocol version
+│   ├── Mcp.ts            the client's `mcpServers` (v1 or v2 shape) → MCP server configs
 │   └── ProjectV1.ts, ProjectV2.ts   domain events → session/update per version
 ├── domain/Events.ts      the version-neutral session model (v2-shaped)
 ├── agent/
@@ -24,13 +25,19 @@ src/
 │   ├── Agent.ts          the core: sessions ⇄ Letta runtimes, turns, approvals, config, history
 │   ├── Client.ts         the client port: emit events / request permission on the negotiated surface
 │   └── Prompt.ts         ACP prompt content → Letta message content; slash-command detection
-└── letta/
-    ├── Executable.ts     finds and validates the host's `letta`
-    ├── AppServer.ts      spawns `letta server --listen`, WebSocket client, request correlation, restarts
-    ├── Protocol.ts       schemas for App Server commands and frames
-    ├── Translator.ts     stream deltas / history rows → domain events
-    ├── Tools.ts          tool-call presentation (titles, kinds, locations, diffs, plans)
-    └── Errors.ts
+├── letta/
+│   ├── Executable.ts     finds and validates the host's `letta`
+│   ├── AppServer.ts      spawns `letta server --listen`, WebSocket client, request correlation, restarts
+│   ├── Protocol.ts       schemas for App Server commands and frames
+│   ├── Translator.ts     stream deltas / history rows → domain events
+│   ├── Tools.ts          tool-call presentation (titles, kinds, locations, diffs, plans)
+│   └── Errors.ts
+└── mcp/                  an MCP client for the servers the ACP client provides
+    ├── Config.ts         McpServerConfig (stdio / Streamable HTTP), McpError
+    ├── Protocol.ts       MCP lifecycle, tools and server-to-client method schemas
+    ├── Transports.ts     stdio (child process) and Streamable HTTP (POST + JSON/SSE, session id) transports
+    ├── McpClient.ts      initialize, paginated tools/list, list_changed, tools/call, roots/list, ping
+    └── Bridge.ts         a session's servers as Letta external tools: names, definitions, results
 ```
 
 ## Flow of a prompt
@@ -62,10 +69,33 @@ other frames are published to a `PubSub` that sessions subscribe to _before_ sta
 state is missed. If the process exits or the socket drops, active turns end with an error and the next use starts
 a new App Server; sessions see the new `generation` and re-attach their runtimes.
 
+## Client MCP servers
+
+ACP clients may pass MCP servers to `session/new`, `session/load` and `session/resume`. `lacp` itself is the MCP
+client: Letta Code has no way to attach a server to one runtime, but it does accept controller-owned _external
+tools_.
+
+1. `acp/Mcp.ts` decodes the version-specific entries; SSE servers and malformed entries are skipped.
+2. While the Letta connection is prepared, `Bridge.connectAll` connects every server concurrently, each in its own
+   scope forked from the session's (so closing the session stops the servers). The MCP client reuses the JSON-RPC
+   peer over an MCP transport and answers `ping` and `roots/list` (the session's working directory). A server that
+   fails or takes longer than 30 seconds is reported as a warning `notice` and left out.
+3. `runtime_start` carries the tools as `external_tools`, named `mcp__<server>__<tool>` (sanitized, at most 64
+   characters) with `auto_background: false` and Letta's maximum timeout.
+4. Letta sends `external_tool_call_request` frames on the runtime's channel; the session runs the call with
+   `tools/call` and answers with `external_tool_call_response`. Errors become `is_error` results.
+5. On `notifications/tools/list_changed` the client refreshes its list and the session sends
+   `runtime_external_tools_update` (when Letta Code advertises that capability).
+
+Tool calls are presented with the MCP tool's title and its `readOnlyHint`, through the translator's
+`externalTool` hook.
+
 ## Testing
 
 - `test/helpers/FakeLetta.ts` is an in-memory App Server connection with scripted responses and frames, and
   `test/helpers/AcpClient.ts` a scripted ACP client over in-memory queues. Together they exercise the full server
   (peer, negotiation, adapters, core) deterministically.
+- `test/mcp.test.ts` drives the MCP client and bridge against `test/fixtures/mcp-server.mjs` (stdio) and an
+  in-test Streamable HTTP server; `test/acp-mcp.test.ts` covers the bridge end to end through the ACP server.
 - `test/e2e.test.ts` runs the same stack against a real Letta Code install with its offline deterministic backend
   (opt-in with `LACP_E2E_LETTA`).

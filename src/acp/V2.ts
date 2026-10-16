@@ -102,7 +102,26 @@ export const supported = present
 // Sessions
 // ---------------------------------------------------------------------------
 
+/** Entries are decoded one by one (see {@link McpServer}) so one bad entry cannot reject the session. */
 const McpServers = Schema.Array(Schema.Unknown)
+
+const NameValue = Schema.Struct({ name: Schema.String, value: Schema.String })
+
+export const McpServer = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("stdio"),
+    name: Schema.String,
+    command: Schema.String,
+    args: Schema.optionalKey(Schema.Array(Schema.String)),
+    env: Schema.optionalKey(Schema.Array(NameValue))
+  }),
+  Schema.Struct({
+    type: Schema.Literal("http"),
+    name: Schema.String,
+    url: Schema.String,
+    headers: Schema.optionalKey(Schema.Array(NameValue))
+  })
+])
 
 export const SelectOption = Schema.Struct({
   value: Schema.String,

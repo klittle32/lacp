@@ -12,6 +12,7 @@
  */
 import { Config, Console, Duration, Effect, Layer, Option, type Redacted, Schema } from "effect"
 import { Command, Flag } from "effect/cli"
+import { FetchHttpClient } from "effect/http"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { AcpServer } from "./agent/AcpServer.ts"
 import { Agent } from "./agent/Agent.ts"
@@ -126,6 +127,7 @@ const configLayer = (input: Flags) =>
 /** Everything the ACP server needs, given its configuration. */
 export const ServerLayer = AcpServer.layer.pipe(
   Layer.provide(Agent.layer),
+  Layer.provide(FetchHttpClient.layer),
   Layer.provide(LettaAppServer.layer),
   Layer.provide(LettaExecutable.layer),
   Layer.provide(layerWebSocket),

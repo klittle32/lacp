@@ -39,6 +39,34 @@ export const MessageContentPart = Schema.Union([
 ])
 export type MessageContentPart = typeof MessageContentPart.Type
 
+/** A controller-owned tool, executed by this bridge when Letta calls it (Letta allows 1s–300s timeouts). */
+export const ExternalToolDefinition = Schema.Struct({
+  name: Schema.String,
+  label: opt(Schema.String),
+  description: Schema.String,
+  parameters: Schema.Record(Schema.String, Schema.Unknown),
+  timeout_ms: opt(Schema.Int),
+  auto_background: opt(Schema.Boolean)
+})
+export type ExternalToolDefinition = typeof ExternalToolDefinition.Type
+
+export const ExternalToolsGroup = Schema.Struct({
+  scope_id: opt(Schema.String),
+  tools: Schema.Array(ExternalToolDefinition)
+})
+
+/** Letta accepts `text` and base64 `image` parts. */
+export const ExternalToolResult = Schema.Struct({
+  content: Schema.Array(Schema.Struct({
+    type: Schema.String,
+    text: opt(Schema.String),
+    data: opt(Schema.String),
+    mimeType: opt(Schema.String)
+  })),
+  is_error: opt(Schema.Boolean)
+})
+export type ExternalToolResult = typeof ExternalToolResult.Type
+
 export const Command = Schema.Union([
   Schema.Struct({ type: Schema.Literal("app_server_info"), request_id: Schema.String }),
   Schema.Struct({
@@ -52,7 +80,22 @@ export const Command = Schema.Union([
     client_info: opt(Schema.Struct({ name: Schema.String, title: opt(Schema.String), version: opt(Schema.String) })),
     recover_approvals: opt(Schema.Boolean),
     force_device_status: opt(Schema.Boolean),
-    wait_for_replay: opt(Schema.Boolean)
+    wait_for_replay: opt(Schema.Boolean),
+    external_tools: opt(Schema.Array(ExternalToolsGroup))
+  }),
+  Schema.Struct({
+    type: Schema.Literal("runtime_external_tools_update"),
+    request_id: Schema.String,
+    updates: Schema.Array(Schema.Struct({
+      runtimes: Schema.Array(RuntimeScope),
+      external_tools: Schema.Array(ExternalToolsGroup)
+    }))
+  }),
+  Schema.Struct({
+    type: Schema.Literal("external_tool_call_response"),
+    request_id: Schema.String,
+    result: opt(ExternalToolResult),
+    error: opt(Schema.String)
   }),
   Schema.Struct({
     type: Schema.Literal("input"),
@@ -235,6 +278,8 @@ export const CreateAgentResponse = response({
 
 export const ExecuteCommandResponse = response({ output: opt(Schema.String) })
 
+export const RuntimeExternalToolsUpdateResponse = response({})
+
 export const AbortMessageResponse = response({ aborted: opt(Schema.Boolean) })
 
 export const GetCwdMapResponse = response({
@@ -339,6 +384,17 @@ export const QueueUpdate = Schema.Struct({
   })))
 })
 export type QueueUpdate = typeof QueueUpdate.Type
+
+export const ExternalToolCallRequest = Schema.Struct({
+  type: Schema.Literal("external_tool_call_request"),
+  request_id: Schema.String,
+  runtime: opt(RuntimeScope),
+  scope_id: optNull(Schema.String),
+  tool_call_id: Schema.String,
+  tool_name: Schema.String,
+  input: Schema.Record(Schema.String, Schema.Unknown)
+})
+export type ExternalToolCallRequest = typeof ExternalToolCallRequest.Type
 
 export const StreamDelta = Schema.Struct({
   type: Schema.Literal("stream_delta"),

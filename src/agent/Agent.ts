@@ -22,9 +22,12 @@ import {
   PubSub,
   Schema,
   Scope,
-  Semaphore
+  Semaphore,
+  Stream
 } from "effect"
 import { Crypto } from "effect/Crypto"
+import { HttpClient } from "effect/http"
+import { ChildProcessSpawner } from "effect/process"
 import type { ContentBlock } from "../acp/Content.ts"
 import * as Content from "../acp/Content.ts"
 import { LacpConfig } from "../Config.ts"
@@ -48,6 +51,8 @@ import {
   CreateAgentResponse,
   DeviceStatus,
   ExecuteCommandResponse,
+  ExternalToolCallRequest,
+  type ExternalToolDefinition,
   GetCwdMapResponse,
   InputAccepted,
   ListModelsResponse,
@@ -56,6 +61,7 @@ import {
   type PermissionMode,
   PermissionMode as PermissionModeSchema,
   QueueUpdate,
+  RuntimeExternalToolsUpdateResponse,
   type RuntimeScope,
   RuntimeStartResponse,
   StreamDelta,
@@ -63,6 +69,8 @@ import {
   UpdateModelResponse
 } from "../letta/Protocol.ts"
 import * as Translator from "../letta/Translator.ts"
+import * as Bridge from "../mcp/Bridge.ts"
+import type { McpServerConfig } from "../mcp/Config.ts"
 import { AGENT_NAME, AGENT_TITLE, VERSION } from "../Version.ts"
 import { AcpClient } from "./Client.ts"
 import { plainText, slashCommand, toLettaContent } from "./Prompt.ts"
@@ -162,6 +170,7 @@ const decodeControlRequest = decode(ControlRequest)
 const decodeLoopStatus = decode(LoopStatus)
 const decodeDeviceStatus = decode(DeviceStatus)
 const decodeQueueUpdate = decode(QueueUpdate)
+const decodeExternalToolCall = decode(ExternalToolCallRequest)
 const decodePermissionMode = decode(PermissionModeSchema)
 
 /** Letta stop reasons onto ACP stop reasons. */
@@ -235,6 +244,8 @@ interface Session {
   localCommand: boolean
   /** Approval requests awaiting the client's answer. */
   approvals: number
+  /** The client's MCP servers, bridged into Letta as external tools. */
+  readonly mcp: Bridge.McpBridge
 }
 
 // ---------------------------------------------------------------------------
@@ -244,12 +255,16 @@ interface Session {
 export class Agent extends Context.Service<Agent, {
   /** Starts Letta Code in the background. */
   readonly warmup: Effect.Effect<void>
-  newSession(input: { readonly cwd: string }): Effect.Effect<SessionSetup, AgentError>
+  newSession(input: {
+    readonly cwd: string
+    readonly mcpServers: ReadonlyArray<McpServerConfig>
+  }): Effect.Effect<SessionSetup, AgentError>
   /** Attaches to an existing conversation; with `replay`, its history is emitted first. */
   loadSession(input: {
     readonly sessionId: string
     readonly cwd: string
     readonly replay: boolean
+    readonly mcpServers: ReadonlyArray<McpServerConfig>
   }): Effect.Effect<SessionSetup, AgentError>
   listSessions(input: {
     readonly cwd: Option.Option<string>
@@ -280,6 +295,8 @@ export class Agent extends Context.Service<Agent, {
       const crypto = yield* Crypto
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+      const httpClient = yield* HttpClient.HttpClient
       const layerScope = yield* Effect.scope
       const sessions = new Map<string, Session>()
       const agentsByCwd = new Map<string, string>()
@@ -512,6 +529,36 @@ export class Agent extends Context.Service<Agent, {
           }
         })
 
+      /** Runs a bridged MCP tool for Letta and returns its result. */
+      const onExternalToolCall = (session: Session, attachment: Attachment, frame: ExternalToolCallRequest) =>
+        session.mcp.call(frame.tool_name, frame.input).pipe(
+          Effect.flatMap((result) =>
+            attachment.connection.send({ type: "external_tool_call_response", request_id: frame.request_id, result })
+          ),
+          Effect.catch((error) => Effect.logWarning(`Could not return an MCP tool result to Letta: ${error.message}`)),
+          Effect.forkIn(session.scope),
+          Effect.asVoid
+        )
+
+      /** Re-registers the bridged tools after an MCP server's tool list changed. */
+      const updateTools = Effect.fnUntraced(function*(session: Session) {
+        if (Option.isNone(session.attachment)) return
+        const { connection: conn, runtime } = session.attachment.value
+        if (conn.info.capabilities?.["runtime_external_tools_update"] !== true) {
+          yield* Effect.logWarning("This Letta Code cannot update MCP tools live; they refresh on the next session")
+          return
+        }
+        const tools = yield* session.mcp.tools
+        yield* conn.call(
+          (request_id) => ({
+            type: "runtime_external_tools_update",
+            request_id,
+            updates: [{ runtimes: [runtime], external_tools: [{ tools }] }]
+          }),
+          RuntimeExternalToolsUpdateResponse
+        ).pipe(Effect.catch((error) => Effect.logWarning(`Could not update MCP tools: ${error.message}`)))
+      })
+
       const onDeviceStatus = (session: Session, frame: DeviceStatus) =>
         Effect.gen(function*() {
           const status = frame.device_status
@@ -565,6 +612,11 @@ export class Agent extends Context.Service<Agent, {
             return Option.match(decodeDeviceStatus(frame.raw), {
               onNone: () => Effect.void,
               onSome: (f) => onDeviceStatus(session, f)
+            })
+          case "external_tool_call_request":
+            return Option.match(decodeExternalToolCall(frame.raw), {
+              onNone: () => Effect.void,
+              onSome: (f) => onExternalToolCall(session, attachment, f)
             })
           case "update_queue":
             return Option.match(decodeQueueUpdate(frame.raw), {
@@ -621,6 +673,7 @@ export class Agent extends Context.Service<Agent, {
         readonly agentId: string
         readonly conversationId: Option.Option<string>
         readonly cwd: string
+        readonly tools: ReadonlyArray<ExternalToolDefinition>
       }
 
       /** Starts a runtime and subscribes to its frames (before `runtime_start`, so nothing is missed). */
@@ -641,7 +694,8 @@ export class Agent extends Context.Service<Agent, {
               client_info: { name: AGENT_NAME, title: AGENT_TITLE, version: VERSION },
               recover_approvals: true,
               force_device_status: true,
-              wait_for_replay: true
+              wait_for_replay: true,
+              ...(target.tools.length > 0 ? { external_tools: [{ tools: target.tools }] } : {})
             }),
             RuntimeStartResponse,
             { timeout: "2 minutes" }
@@ -686,7 +740,8 @@ export class Agent extends Context.Service<Agent, {
         const started = yield* startRuntime(conn, session.scope, {
           agentId: session.agentId,
           conversationId: Option.some(session.id),
-          cwd: session.cwd
+          cwd: session.cwd,
+          tools: yield* session.mcp.tools
         })
         yield* attach(session, started, conn)
         if (Option.isSome(session.mode) && Option.isNone(config.permissionMode)) {
@@ -703,11 +758,12 @@ export class Agent extends Context.Service<Agent, {
 
       const makeSession = Effect.fnUntraced(function*(
         conn: LettaConnection,
+        scope: Scope.Closeable,
+        mcp: Bridge.McpBridge,
         agentId: string,
         cwd: string,
         started: Effect.Success<ReturnType<typeof startRuntime>>
       ) {
-        const scope = yield* Scope.fork(layerScope)
         const session: Session = {
           id: started.runtime.conversation_id,
           agentId,
@@ -716,7 +772,8 @@ export class Agent extends Context.Service<Agent, {
           translator: Translator.make({
             cwd: () => session.cwd,
             path,
-            contextWindow: () => session.contextWindow
+            contextWindow: () => session.contextWindow,
+            externalTool: (name) => session.mcp.describe(name)
           }),
           turnLock: yield* Semaphore.make(1),
           permissions: yield* Scope.provide(FiberSet.make<void, never>(), scope),
@@ -734,13 +791,24 @@ export class Agent extends Context.Service<Agent, {
           foreground: "idle",
           deviceStatus: yield* Deferred.make<void>(),
           localCommand: false,
-          approvals: 0
+          approvals: 0,
+          mcp
         }
-        // The runtime scope belongs to the session from now on.
-        yield* Scope.addFinalizer(scope, Scope.close(started.scope, Exit.void))
         sessions.set(session.id, session)
+        yield* mcp.changes.pipe(Stream.runForEach(() => updateTools(session)), Effect.forkIn(scope))
         return session
       })
+
+      /** Connects the client's MCP servers for a session (inside the session's scope). */
+      const connectMcp = (servers: ReadonlyArray<McpServerConfig>, cwd: string, scope: Scope.Scope) =>
+        Bridge.connectAll(servers, {
+          roots: [cwd],
+          clientInfo: { name: AGENT_NAME, title: AGENT_TITLE, version: VERSION }
+        }).pipe(
+          Scope.provide(scope),
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(HttpClient.HttpClient, httpClient)
+        )
 
       /** Waits briefly for the runtime's first device status (mode and commands). */
       const settle = Effect.fnUntraced(function*(session: Session, attachment: Attachment) {
@@ -767,6 +835,14 @@ export class Agent extends Context.Service<Agent, {
         Effect.gen(function*() {
           if (session.commands.length > 0) {
             yield* emit(session, { _tag: "AvailableCommands", commands: session.commands })
+          }
+          for (const failure of session.mcp.failures) {
+            yield* emit(session, {
+              _tag: "Notice",
+              severity: "warning",
+              title: `MCP server "${failure.server}" is unavailable`,
+              description: failure.message
+            })
           }
         }).pipe(Effect.delay("10 millis"), Effect.forkIn(session.scope), Effect.asVoid)
 
@@ -873,72 +949,98 @@ export class Agent extends Context.Service<Agent, {
           if (response.has_more !== true || response.next_before === undefined || response.next_before === null) break
           before = response.next_before
         }
-        const history = Translator.make({ cwd: () => session.cwd, path, contextWindow: () => session.contextWindow })
+        const history = Translator.make({
+          cwd: () => session.cwd,
+          path,
+          contextWindow: () => session.contextWindow,
+          externalTool: (name) => session.mcp.describe(name)
+        })
         for (const row of rows.toReversed()) yield* emitAll(session, history.history(row))
         yield* emitAll(session, history.finishTurn("end_turn"))
       })
 
       // --- operations -------------------------------------------------------
 
-      const newSession = Effect.fn("Agent.newSession")(function*(input: { readonly cwd: string }) {
-        const conn = yield* connection
-        const agentId = yield* resolveAgent(conn, input.cwd, true).pipe(Effect.map(Option.getOrThrow))
-        const started = yield* startRuntime(conn, layerScope, {
-          agentId,
-          conversationId: Option.none(),
-          cwd: input.cwd
-        })
-        const session = yield* makeSession(conn, agentId, input.cwd, started)
-        yield* attach(session, started, conn)
-        const attachment = Option.getOrThrow(session.attachment)
-        yield* settle(session, attachment)
-        yield* applyConfiguredModel(session, attachment)
-        yield* announce(session)
-        yield* Effect.logInfo(`Started session ${session.id} (agent ${agentId}) in ${input.cwd}`)
-        return setup(session)
+      const newSession = Effect.fn("Agent.newSession")(function*(input: {
+        readonly cwd: string
+        readonly mcpServers: ReadonlyArray<McpServerConfig>
+      }) {
+        const scope = yield* Scope.fork(layerScope)
+        return yield* Effect.gen(function*() {
+          // Letta and the client's MCP servers start concurrently.
+          const [conn, mcp] = yield* Effect.all([connection, connectMcp(input.mcpServers, input.cwd, scope)], {
+            concurrency: "unbounded"
+          })
+          const agentId = yield* resolveAgent(conn, input.cwd, true).pipe(Effect.map(Option.getOrThrow))
+          const started = yield* startRuntime(conn, scope, {
+            agentId,
+            conversationId: Option.none(),
+            cwd: input.cwd,
+            tools: yield* mcp.tools
+          })
+          const session = yield* makeSession(conn, scope, mcp, agentId, input.cwd, started)
+          yield* attach(session, started, conn)
+          const attachment = Option.getOrThrow(session.attachment)
+          yield* settle(session, attachment)
+          yield* applyConfiguredModel(session, attachment)
+          yield* announce(session)
+          yield* Effect.logInfo(
+            `Started session ${session.id} (agent ${agentId}) in ${input.cwd}` +
+              (mcp.connected.length > 0 ? ` with MCP servers: ${mcp.connected.join(", ")}` : "")
+          )
+          return setup(session)
+        }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
       })
 
       const loadSession = Effect.fn("Agent.loadSession")(function*(input: {
         readonly sessionId: string
         readonly cwd: string
         readonly replay: boolean
+        readonly mcpServers: ReadonlyArray<McpServerConfig>
       }) {
-        const conn = yield* connection
         const existing = sessions.get(input.sessionId)
         if (existing !== undefined) {
+          const conn = yield* connection
           existing.cwd = input.cwd
           yield* ensureAttached(existing)
           if (input.replay) yield* replay(existing, conn)
           yield* announce(existing)
           return setup(existing)
         }
-        const retrieved = yield* conn.call(
-          (request_id) => ({ type: "conversation_retrieve", request_id, conversation_id: input.sessionId }),
-          ConversationRetrieveResponse
-        ).pipe(Effect.mapError(() => new SessionNotFound({ sessionId: input.sessionId })))
-        const conversation = retrieved.conversation
-        if (conversation === null) return yield* new SessionNotFound({ sessionId: input.sessionId })
-        const agentId = conversation.agent_id ?? Option.getOrUndefined(yield* resolveAgent(conn, input.cwd, false))
-        if (agentId === undefined) return yield* new SessionNotFound({ sessionId: input.sessionId })
-        const started = yield* startRuntime(conn, layerScope, {
-          agentId,
-          conversationId: Option.some(input.sessionId),
-          cwd: input.cwd
-        })
-        const session = yield* makeSession(conn, agentId, input.cwd, started)
-        if (input.replay) yield* replay(session, conn)
-        yield* attach(session, started, conn)
-        yield* settle(session, Option.getOrThrow(session.attachment))
-        const title = conversation.summary ?? conversation.description
-        if (title !== undefined && title !== null && title !== "") {
-          yield* emit(session, {
-            _tag: "SessionInfo",
-            title,
-            ...(conversation.last_message_at ? { updatedAt: conversation.last_message_at } : {})
+        const scope = yield* Scope.fork(layerScope)
+        return yield* Effect.gen(function*() {
+          const [conn, mcp] = yield* Effect.all([connection, connectMcp(input.mcpServers, input.cwd, scope)], {
+            concurrency: "unbounded"
           })
-        }
-        yield* announce(session)
-        return setup(session)
+          const retrieved = yield* conn.call(
+            (request_id) => ({ type: "conversation_retrieve", request_id, conversation_id: input.sessionId }),
+            ConversationRetrieveResponse
+          ).pipe(Effect.mapError(() => new SessionNotFound({ sessionId: input.sessionId })))
+          const conversation = retrieved.conversation
+          if (conversation === null) return yield* new SessionNotFound({ sessionId: input.sessionId })
+          const agentId = conversation.agent_id ?? Option.getOrUndefined(yield* resolveAgent(conn, input.cwd, false))
+          if (agentId === undefined) return yield* new SessionNotFound({ sessionId: input.sessionId })
+          const started = yield* startRuntime(conn, scope, {
+            agentId,
+            conversationId: Option.some(input.sessionId),
+            cwd: input.cwd,
+            tools: yield* mcp.tools
+          })
+          const session = yield* makeSession(conn, scope, mcp, agentId, input.cwd, started)
+          if (input.replay) yield* replay(session, conn)
+          yield* attach(session, started, conn)
+          yield* settle(session, Option.getOrThrow(session.attachment))
+          const title = conversation.summary ?? conversation.description
+          if (title !== undefined && title !== null && title !== "") {
+            yield* emit(session, {
+              _tag: "SessionInfo",
+              title,
+              ...(conversation.last_message_at ? { updatedAt: conversation.last_message_at } : {})
+            })
+          }
+          yield* announce(session)
+          return setup(session)
+        }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
       })
 
       const listSessions = Effect.fn("Agent.listSessions")(function*(input: {

@@ -12,6 +12,7 @@
  */
 import { Array as Arr, Option, type Path, Schema } from "effect"
 import * as Content from "../acp/Content.ts"
+import type { ToolKind } from "../acp/Content.ts"
 import type {
   DiffHunk,
   PermissionChoice,
@@ -44,6 +45,8 @@ export interface TranslatorContext {
   readonly path: Path.Path
   /** The model's context window, for usage updates. */
   readonly contextWindow: () => Option.Option<number>
+  /** Presentation of controller-owned tools (bridged MCP tools), by tool name. */
+  readonly externalTool?: (name: string) => Option.Option<{ readonly title: string; readonly kind: ToolKind }>
 }
 
 export interface Translator {
@@ -150,7 +153,16 @@ export const make = (context: TranslatorContext): Translator => {
   const toolContext = (): Tools.ToolContext => ({ cwd: context.cwd(), path: context.path })
 
   const presentation = (state: ToolState): Tools.Presentation =>
-    Tools.present(state.name, Option.getOrElse(state.input, () => ({})), toolContext(), state.hunks)
+    Option.match(context.externalTool?.(state.name) ?? Option.none(), {
+      onNone: () => Tools.present(state.name, Option.getOrElse(state.input, () => ({})), toolContext(), state.hunks),
+      onSome: ({ kind, title }): Tools.Presentation => ({
+        title,
+        kind,
+        locations: [],
+        content: [],
+        terminal: Option.none()
+      })
+    })
 
   /** The full description of a tool call, from what is known so far. */
   const describe = (id: string, state: ToolState): ToolCallPatch => {

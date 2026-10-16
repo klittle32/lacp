@@ -119,8 +119,27 @@ export const Authenticate = request(
 // Sessions
 // ---------------------------------------------------------------------------
 
-/** MCP server configs are accepted and recorded; their shape is not interpreted here. */
+/** Entries are decoded one by one (see {@link McpServer}) so one bad entry cannot reject the session. */
 const McpServers = Schema.Array(Schema.Unknown)
+
+const NameValue = Schema.Struct({ name: Schema.String, value: Schema.String })
+
+/** v1 MCP server configs: stdio entries carry no `type`; `sse` is deprecated and not supported. */
+export const McpServer = Schema.Union([
+  Schema.Struct({
+    type: Schema.optionalKey(Schema.Literal("stdio")),
+    name: Schema.String,
+    command: Schema.String,
+    args: Schema.optionalKey(Schema.Array(Schema.String)),
+    env: Schema.optionalKey(Schema.Array(NameValue))
+  }),
+  Schema.Struct({
+    type: Schema.Literals(["http", "sse"]),
+    name: Schema.String,
+    url: Schema.String,
+    headers: Schema.optionalKey(Schema.Array(NameValue))
+  })
+])
 
 export const SessionMode = Schema.Struct({
   id: Schema.String,

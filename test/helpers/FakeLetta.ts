@@ -125,7 +125,8 @@ export const make = Effect.gen(function*() {
       boot_working_directory: "/work"
     }),
     abort_message: () => ({ success: true, aborted: true }),
-    execute_command: () => ({ success: true, output: "Compacted." })
+    execute_command: () => ({ success: true, output: "Compacted." }),
+    runtime_external_tools_update: () => ({ success: true })
   }
 
   const respond = (command: Command): unknown => {
@@ -138,7 +139,13 @@ export const make = Effect.gen(function*() {
 
   const connection: LettaConnection = {
     generation: 1,
-    info: { success: true, backend: "local", letta_code_version: "0.34.15", protocol_version: 1 },
+    info: {
+      success: true,
+      backend: "local",
+      letta_code_version: "0.34.15",
+      protocol_version: 1,
+      capabilities: { runtime_external_tools_update: true }
+    },
     install: Option.none(),
     call: <A extends Reply, I>(make: (requestId: string) => Command, response: Schema.Codec<A, I>) =>
       Effect.gen(function*() {

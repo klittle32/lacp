@@ -123,6 +123,12 @@ ACP client ──stdio, JSON-RPC (ACP v1 or v2)──▶ lacp ──WebSocket─
   (`session/request_permission`) and forwards the answer, including "always allow" suggestions.
 - Modes are Letta Code's permission modes, models come from Letta's model catalog, and slash commands are the
   App Server's commands plus those contributed by your mods.
+- MCP servers the editor offers in `session/new` (for example T3 Code's per-session server) are connected by
+  `lacp`, over stdio or Streamable HTTP, and their tools are registered with the Letta runtime as external tools
+  named `mcp__<server>__<tool>`. Letta Code runs them like its own tools (with its approval rules), and `lacp`
+  executes each call against the editor's server. Tools added later (`notifications/tools/list_changed`) are
+  re-registered live. A server that cannot start is skipped with a warning; the session still opens. MCP
+  servers configured in Letta Code itself keep working alongside them.
 - Ambient variables leaked by a parent Letta session (`AGENT_ID`, `USER_CWD`, `MEMORY_DIR`, …) are removed before
   `letta` starts, so the editor session cannot accidentally bind to another agent.
 
@@ -131,8 +137,8 @@ More detail: [docs/architecture.md](docs/architecture.md). Why both ACP versions
 
 ### Known limitations
 
-- MCP servers offered by the client (`mcpServers` in `session/new`) are not bridged yet; configure MCP servers in
-  Letta Code itself. Letta Code's own MCP servers work.
+- Client MCP servers using the deprecated SSE transport are skipped (stdio and Streamable HTTP are supported).
+  A bridged tool call may take at most 5 minutes, Letta's limit for external tools.
 - Client file-system and terminal capabilities are not used: tools run in Letta Code on your machine.
 - Session forking and deletion are not offered.
 

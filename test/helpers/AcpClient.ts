@@ -5,6 +5,7 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import { type Cause, Context, Deferred, Effect, Layer, PubSub, Queue, Ref, Schema } from "effect"
+import { FetchHttpClient } from "effect/http"
 import { AcpServer } from "../../src/agent/AcpServer.ts"
 import { Agent } from "../../src/agent/Agent.ts"
 import { AcpClient } from "../../src/agent/Client.ts"
@@ -77,6 +78,7 @@ export const startWith = <E>(
 
     const layer = AcpServer.layer.pipe(
       Layer.provide(Agent.layer),
+      Layer.provide(FetchHttpClient.layer),
       Layer.provide(appServer),
       Layer.provideMerge(AcpClient.layer),
       Layer.provide(JsonRpcPeer.layer),

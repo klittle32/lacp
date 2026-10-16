@@ -8,6 +8,7 @@
  * v1, which keeps hybrid clients working.
  */
 import { Context, Effect, Layer, Match, Option, Ref, Schema } from "effect"
+import * as Mcp from "../acp/Mcp.ts"
 import * as ProjectV1 from "../acp/ProjectV1.ts"
 import * as ProjectV2 from "../acp/ProjectV2.ts"
 import * as V1 from "../acp/V1.ts"
@@ -74,14 +75,6 @@ export class AcpServer extends Context.Service<AcpServer, {
       const config = yield* LacpConfig
       const surface = yield* Ref.make(Option.none<Method.Dispatcher>())
 
-      const warnMcp = (servers: ReadonlyArray<unknown> | undefined) =>
-        servers === undefined || servers.length === 0
-          ? Effect.void
-          : Effect.logWarning(
-            `The client offered ${servers.length} MCP server(s); lacp does not bridge client MCP servers yet. ` +
-              "Configure MCP servers in Letta Code instead."
-          )
-
       /** Terminal auth is only offered where it can work: a terminal-capable client and an interactive login. */
       const offerSetup = (terminalAuth: boolean) =>
         terminalAuth && (config.auth === "host" || config.auth === "cloud-oauth")
@@ -95,8 +88,8 @@ export class AcpServer extends Context.Service<AcpServer, {
             methodId === SETUP_METHOD_ID ? Effect.succeed({}) : Effect.fail(RpcError.invalidParams({ methodId }))
         ),
         Method.handle(V1.NewSession, (params) =>
-          warnMcp(params.mcpServers).pipe(
-            Effect.andThen(rpc(agent.newSession({ cwd: params.cwd }))),
+          Mcp.fromWire(1, params.mcpServers).pipe(
+            Effect.flatMap((mcpServers) => rpc(agent.newSession({ cwd: params.cwd, mcpServers }))),
             Effect.map((setup) => ({
               sessionId: setup.sessionId,
               ...v1Options(setup.configOptions)
@@ -105,14 +98,20 @@ export class AcpServer extends Context.Service<AcpServer, {
         Method.handle(
           V1.LoadSession,
           (params) =>
-            rpc(agent.loadSession({ sessionId: params.sessionId, cwd: params.cwd, replay: true })).pipe(
+            Mcp.fromWire(1, params.mcpServers).pipe(
+              Effect.flatMap((mcpServers) =>
+                rpc(agent.loadSession({ sessionId: params.sessionId, cwd: params.cwd, replay: true, mcpServers }))
+              ),
               Effect.map((setup) => v1Options(setup.configOptions))
             )
         ),
         Method.handle(
           V1.ResumeSession,
           (params) =>
-            rpc(agent.loadSession({ sessionId: params.sessionId, cwd: params.cwd, replay: false })).pipe(
+            Mcp.fromWire(1, params.mcpServers).pipe(
+              Effect.flatMap((mcpServers) =>
+                rpc(agent.loadSession({ sessionId: params.sessionId, cwd: params.cwd, replay: false, mcpServers }))
+              ),
               Effect.map((setup) => v1Options(setup.configOptions))
             )
         ),
@@ -180,8 +179,8 @@ export class AcpServer extends Context.Service<AcpServer, {
             )
         ),
         Method.handle(V2.NewSession, (params) =>
-          warnMcp(params.mcpServers).pipe(
-            Effect.andThen(rpc(agent.newSession({ cwd: params.cwd }))),
+          Mcp.fromWire(2, params.mcpServers).pipe(
+            Effect.flatMap((mcpServers) => rpc(agent.newSession({ cwd: params.cwd, mcpServers }))),
             Effect.map((setup) => ({
               sessionId: setup.sessionId,
               configOptions: setup.configOptions.map(ProjectV2.configOption),
@@ -193,11 +192,15 @@ export class AcpServer extends Context.Service<AcpServer, {
           if (replayFrom !== undefined && replayFrom !== null && replayFrom.type !== "start") {
             return Effect.fail(RpcError.invalidParams({ replayFrom }))
           }
-          return rpc(agent.loadSession({
-            sessionId: params.sessionId,
-            cwd: params.cwd,
-            replay: replayFrom?.type === "start"
-          })).pipe(
+          return Mcp.fromWire(2, params.mcpServers).pipe(
+            Effect.flatMap((mcpServers) =>
+              rpc(agent.loadSession({
+                sessionId: params.sessionId,
+                cwd: params.cwd,
+                replay: replayFrom?.type === "start",
+                mcpServers
+              }))
+            ),
             Effect.tap((setup) => snapshot(setup.sessionId)),
             Effect.map((setup) => ({
               configOptions: setup.configOptions.map(ProjectV2.configOption),
@@ -253,7 +256,7 @@ export class AcpServer extends Context.Service<AcpServer, {
               protocolVersion: V2.PROTOCOL_VERSION,
               info: agentInfo,
               capabilities: {
-                session: { prompt: { image: {}, embeddedContext: {} } }
+                session: { prompt: { image: {}, embeddedContext: {} }, mcp: { stdio: {}, http: {} } }
               },
               authMethods: offerSetup(terminal)
                 ? [{
@@ -290,7 +293,7 @@ export class AcpServer extends Context.Service<AcpServer, {
             agentCapabilities: {
               loadSession: true,
               promptCapabilities: { image: true, audio: false, embeddedContext: true },
-              mcpCapabilities: { http: false, sse: false },
+              mcpCapabilities: { http: true, sse: false },
               sessionCapabilities: { list: {}, resume: {}, close: {} }
             },
             authMethods: offerSetup(terminal)

@@ -9,9 +9,12 @@
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
 import { Effect, FileSystem, Layer, Option, Path } from "effect"
+import { fileURLToPath } from "node:url"
 import { layerWebSocket, LettaAppServer } from "../src/letta/AppServer.ts"
 import { LettaExecutable } from "../src/letta/Executable.ts"
 import { allowOnce, initializeHybrid, initializeV1, startWith } from "./helpers/AcpClient.ts"
+
+const mcpFixture = fileURLToPath(new URL("./fixtures/mcp-server.mjs", import.meta.url))
 
 // oxlint-disable-next-line effecttsgo/process-env -- test-only opt-in switch
 const letta = process.env["LACP_E2E_LETTA"]
@@ -93,6 +96,23 @@ describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
       const replayed = (yield* client.updates).slice(resumedFrom)
       assert.isTrue(replayed.some((u) => u.sessionUpdate === "agent_message_chunk" && u.content.text === "pong"))
       assert.isTrue(replayed.some((u) => u.sessionUpdate === "user_message_chunk" && u.content.text.includes("hello")))
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), 180_000)
+
+  it.live("ACP v2: the client's MCP servers are registered with Letta as external tools", () =>
+    Effect.gen(function*() {
+      const { client, cwd } = yield* startReal
+      yield* client.request("initialize", initializeHybrid)
+      // Letta validates every tool definition in runtime_start; a rejected one fails session/new.
+      const created = yield* client.request("session/new", {
+        cwd,
+        mcpServers: [{ type: "stdio", name: "fixture", command: process.execPath, args: [mcpFixture], env: [] }]
+      })
+      assert.isUndefined(created.error)
+      const sessionId = created.result.sessionId as string
+      const reply = yield* client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] })
+      yield* client.update((u) => u.sessionUpdate === "user_message" && u.messageId === reply.result.messageId)
+      yield* client.update((u) => u.sessionUpdate === "agent_message_chunk" && u.content.text === "pong")
+      assert.isFalse((yield* client.updates).some((u) => u.sessionUpdate === "notice"))
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), 180_000)
 
   it.live("ACP v1: session/prompt resolves with end_turn", () =>
