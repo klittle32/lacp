@@ -9,6 +9,7 @@ import { FetchHttpClient } from "effect/http"
 import { AcpServer } from "../../src/agent/AcpServer.ts"
 import { Agent } from "../../src/agent/Agent.ts"
 import { AcpClient } from "../../src/agent/Client.ts"
+import { Settings } from "../../src/agent/Settings.ts"
 import { LacpConfig, type LacpConfigShape } from "../../src/Config.ts"
 import { Host, type HostShape } from "../../src/Host.ts"
 import { JsonRpcPeer } from "../../src/jsonrpc/Peer.ts"
@@ -78,6 +79,7 @@ export const startWith = <E>(
 
     const layer = AcpServer.layer.pipe(
       Layer.provide(Agent.layer),
+      Layer.provide(Settings.layer),
       Layer.provide(FetchHttpClient.layer),
       Layer.provide(appServer),
       Layer.provideMerge(AcpClient.layer),

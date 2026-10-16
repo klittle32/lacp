@@ -49,7 +49,7 @@ import { Transport } from "./Transport.ts"
 const CancelParams = Schema.Struct({ requestId: RequestIdSchema, reason: Schema.optionalKey(Schema.String) })
 
 /** `$/cancel_request`: ACP's protocol-level cancellation, valid in both directions. */
-export const CancelRequest = notification("$/cancel_request", CancelParams)
+const CancelRequest = notification("$/cancel_request", CancelParams)
 
 /** `notifications/cancelled`: MCP's cancellation notification. */
 export const McpCancelled = notification("notifications/cancelled", CancelParams)

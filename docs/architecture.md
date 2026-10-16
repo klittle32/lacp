@@ -22,7 +22,9 @@ src/
 ├── domain/Events.ts      the version-neutral session model (v2-shaped)
 ├── agent/
 │   ├── AcpServer.ts      initialize negotiation; v1 and v2 method sets over the core
-│   ├── Agent.ts          the core: sessions ⇄ Letta runtimes, turns, approvals, config, history
+│   ├── Agent.ts          the core: sessions ⇄ Letta runtimes, turns, approvals, history
+│   ├── Settings.ts       a session's model, effort and mode: config options and applying changes (a service)
+│   ├── Errors.ts         the core's errors, mapped onto JSON-RPC errors by AcpServer
 │   ├── Client.ts         the client port: emit events / request permission on the negotiated surface
 │   └── Prompt.ts         ACP prompt content → Letta message content; slash-command detection
 ├── letta/
@@ -76,18 +78,18 @@ socket drops, active turns end with an error and the next use starts a new App S
 
 ## Models and effort
 
-`Agent` offers three config options: model, effort (`thought_level`) and mode. `letta/Models.ts` builds the model
+Sessions offer three config options: model, effort (`thought_level`) and mode, built and applied by the `Settings`
+service (`agent/Settings.ts`) on each session's settings record. `letta/Models.ts` builds the model
 choices from `list_models`, one per handle and context window, and takes each model's effort levels from
 `letta model list` (run once per App Server, through `LettaAppServer.cli`), falling back to the levels of its
 presets when that is unavailable.
 
-Letta Code expresses effort in two ways, and `Agent` applies a change accordingly:
+Letta Code expresses effort in two ways, and `Settings` applies a change accordingly:
 
 - Hosted models have one catalog preset per effort level: `update_model` with the preset's `model_id`.
 - Models from the user's own providers, a ChatGPT subscription or the local backend report their levels instead:
   `letta model set --conversation <id> --reasoning <level>`, which uses Letta's own per-provider translation, and
-  then `conversation_retrieve` to read the result back. `update_model` with `reasoning_effort` is the fallback when
-  lacp did not start the App Server.
+  then `conversation_retrieve` to read the result back.
 
 The current effort is read from the conversation's `model_settings`. A model switch selects the preset for the
 current effort, else the medium one (Letta resolves a bare handle to its first preset, often `none`), and then

@@ -91,7 +91,7 @@ interface Task {
   status: PlanEntry["status"]
 }
 
-export const PERMISSION_ALLOW = "allow"
+const PERMISSION_ALLOW = "allow"
 export const PERMISSION_REJECT = "reject"
 export const PERMISSION_ALWAYS_PREFIX = "always:"
 const LIVE_OUTPUT_PREFIX = "synthetic-tool-return-stream-"
@@ -117,11 +117,11 @@ const TextPart = Schema.Struct({ type: Schema.Literal("text"), text: Schema.Stri
 const isTextPart = Schema.is(TextPart)
 
 /** Flattens Letta message content (a string or content parts) to text. */
-export const contentText = (content: string | ReadonlyArray<unknown>): string =>
+const contentText = (content: string | ReadonlyArray<unknown>): string =>
   typeof content === "string" ? content : content.filter(isTextPart).map((part) => part.text).join("")
 
 /** Removes the `<system-reminder>` context blocks Letta Code injects into user messages. */
-export const stripReminders = (text: string) => text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim()
+const stripReminders = (text: string) => text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim()
 
 const clip = (text: string) => (text.length > MAX_OUTPUT ? `${text.slice(0, MAX_OUTPUT)}\n… (truncated)` : text)
 

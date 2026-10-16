@@ -34,8 +34,6 @@ export const notification = <P, PI>(name: string, params: Schema.Codec<P, PI>): 
 })
 
 /** Params schema for methods whose params may be omitted or `null` on the wire. */
-export const EmptyParams = Schema.Struct({})
-
 /** A handler with its params/result codecs erased, ready for dispatch. */
 export interface Handler {
   readonly _tag: "Request" | "Notification"

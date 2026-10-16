@@ -72,14 +72,10 @@ const decodeWebSearch = decoder(WebSearch)
 const decodeFetch = decoder(FetchUrl)
 const decodeSkill = decoder(SkillArg)
 const decodeDescription = decoder(Description)
-export const decodeUpdatePlan = decoder(UpdatePlan)
-export const decodeTodoWrite = decoder(TodoWrite)
+const decodeUpdatePlan = decoder(UpdatePlan)
+const decodeTodoWrite = decoder(TodoWrite)
 export const decodeTaskCreate = decoder(TaskCreate)
 export const decodeTaskUpdate = decoder(TaskUpdate)
-
-const SHELL_TOOLS: ReadonlySet<string> = new Set(["Bash", "exec_command", "Shell", "shell", "run_shell_command"])
-
-export const isShellTool = (name: string) => SHELL_TOOLS.has(name)
 
 const truncate = (text: string, max = 80) => {
   const line = text.split("\n")[0] ?? ""

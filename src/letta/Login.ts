@@ -46,7 +46,7 @@ export const environmentKeyNote = (
 }
 
 /** Letta Code's global settings file for a HOME. */
-export const settingsPath = (path: Path.Path, home: string) => path.join(home, ".letta", "settings.json")
+const settingsPath = (path: Path.Path, home: string) => path.join(home, ".letta", "settings.json")
 
 /** Whether `~/.letta/settings.json` holds a login (an OAuth refresh token or an API key). */
 export const inSettingsFile = Effect.fnUntraced(function*(home: string) {

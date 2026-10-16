@@ -17,6 +17,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { AcpServer } from "./agent/AcpServer.ts"
 import { Agent } from "./agent/Agent.ts"
 import { AcpClient } from "./agent/Client.ts"
+import { Settings } from "./agent/Settings.ts"
 import { type AuthMode, LacpConfig, type LacpConfigShape, type LettaRuntime } from "./Config.ts"
 import { Host } from "./Host.ts"
 import { JsonRpcPeer } from "./jsonrpc/Peer.ts"
@@ -27,12 +28,12 @@ import * as Login from "./letta/Login.ts"
 import { ListModelsResponse, type PermissionMode } from "./letta/Protocol.ts"
 import { VERSION } from "./Version.ts"
 
-export class InvalidConfiguration extends Schema.TaggedError<InvalidConfiguration, { readonly brand: unique symbol }>()(
+class InvalidConfiguration extends Schema.TaggedError<InvalidConfiguration, { readonly brand: unique symbol }>()(
   "InvalidConfiguration",
   { message: Schema.String }
 ) {}
 
-export class SetupFailed extends Schema.TaggedError<SetupFailed, { readonly brand: unique symbol }>()(
+class SetupFailed extends Schema.TaggedError<SetupFailed, { readonly brand: unique symbol }>()(
   "SetupFailed",
   { exitCode: Schema.Int }
 ) {}
@@ -149,8 +150,9 @@ const configLayer = (input: Flags) =>
   )
 
 /** Everything the ACP server needs, given its configuration. */
-export const ServerLayer = AcpServer.layer.pipe(
+const ServerLayer = AcpServer.layer.pipe(
   Layer.provide(Agent.layer),
+  Layer.provide(Settings.layer),
   Layer.provide(FetchHttpClient.layer),
   Layer.provide(LettaAppServer.layer),
   Layer.provide(LettaExecutable.layer),

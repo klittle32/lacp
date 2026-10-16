@@ -21,7 +21,7 @@ import { LettaNotFound, LettaUnsupported } from "./Errors.ts"
 import * as Login from "./Login.ts"
 
 /** Oldest Letta Code with the App Server WebSocket protocol (v1) this bridge speaks. */
-export const MINIMUM_VERSION = "0.30.0"
+const MINIMUM_VERSION = "0.30.0"
 
 export interface LettaInstall {
   /** Executable to spawn. */

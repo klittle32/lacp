@@ -19,11 +19,13 @@ import { ErrorCode, RpcError } from "../jsonrpc/JsonRpc.ts"
 import * as Method from "../jsonrpc/Method.ts"
 import { JsonRpcPeer } from "../jsonrpc/Peer.ts"
 import { AGENT_NAME, AGENT_TITLE, VERSION } from "../Version.ts"
-import { Agent, type AgentError, MODE_CONFIG_ID, MODEL_CONFIG_ID, type SessionSummary } from "./Agent.ts"
+import { Agent, type SessionSummary } from "./Agent.ts"
 import { AcpClient } from "./Client.ts"
+import type { AgentError } from "./Errors.ts"
+import { MODE_CONFIG_ID, MODEL_CONFIG_ID } from "./Settings.ts"
 
 /** The terminal-auth method: the client re-runs `lacp setup`, which runs the host's `letta setup`. */
-export const SETUP_METHOD_ID = "letta-setup"
+const SETUP_METHOD_ID = "letta-setup"
 const SETUP_NAME = "Sign in to Letta"
 const SETUP_DESCRIPTION = "Runs `letta setup` in a terminal to sign in to Letta (once per machine)."
 
@@ -37,7 +39,7 @@ const encodeV1Initialize = Schema.encodeEffect(V1.InitializeResponse)
 const encodeV2Initialize = Schema.encodeEffect(V2.InitializeResponse)
 
 /** Maps agent-core failures onto JSON-RPC errors. */
-export const toRpcError: (error: AgentError) => RpcError = Match.type<AgentError>().pipe(
+const toRpcError: (error: AgentError) => RpcError = Match.type<AgentError>().pipe(
   Match.tagsExhaustive({
     SessionNotFound: (e) => RpcError.resourceNotFound(`Session not found: ${e.sessionId}`, { sessionId: e.sessionId }),
     AgentUnavailable: (e) => (e.auth ? RpcError.authRequired(e.message) : RpcError.internal(e.message)),

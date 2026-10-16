@@ -40,8 +40,6 @@ import type {
 } from "../domain/Events.ts"
 import { Host } from "../Host.ts"
 import { type Frame, LettaAppServer, type LettaConnection } from "../letta/AppServer.ts"
-import { isAuthFailure, type LettaError } from "../letta/Errors.ts"
-import * as Models from "../letta/Models.ts"
 import {
   AgentRetrieveResponse,
   ControlRequest,
@@ -55,58 +53,29 @@ import {
   type ExternalToolDefinition,
   GetCwdMapResponse,
   InputAccepted,
-  ListModelsResponse,
   LoopStatus,
-  type ModelSettings,
-  type PermissionMode,
-  PermissionMode as PermissionModeSchema,
   QueueUpdate,
   RuntimeExternalToolsUpdateResponse,
   type RuntimeScope,
   RuntimeStartResponse,
   StreamDelta,
-  TurnFinished,
-  UpdateModelResponse
+  TurnFinished
 } from "../letta/Protocol.ts"
 import * as Translator from "../letta/Translator.ts"
 import * as Bridge from "../mcp/Bridge.ts"
 import type { McpServerConfig } from "../mcp/Config.ts"
 import { AGENT_NAME, AGENT_TITLE, VERSION } from "../Version.ts"
 import { AcpClient } from "./Client.ts"
+import { type AgentError, AgentUnavailable, PromptRejected, SessionNotFound, unavailable } from "./Errors.ts"
 import { plainText, slashCommand, toLettaContent } from "./Prompt.ts"
-
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
-export class SessionNotFound extends Schema.TaggedError<SessionNotFound, { readonly brand: unique symbol }>()(
-  "SessionNotFound",
-  { sessionId: Schema.String }
-) {}
-
-/** Letta Code could not be reached; `auth` marks failures that need a sign-in. */
-export class AgentUnavailable extends Schema.TaggedError<AgentUnavailable, { readonly brand: unique symbol }>()(
-  "AgentUnavailable",
-  { message: Schema.String, auth: Schema.Boolean }
-) {}
-
-export class InvalidConfigValue extends Schema.TaggedError<InvalidConfigValue, { readonly brand: unique symbol }>()(
-  "InvalidConfigValue",
-  { configId: Schema.String, value: Schema.String }
-) {}
-
-export class PromptRejected extends Schema.TaggedError<PromptRejected, { readonly brand: unique symbol }>()(
-  "PromptRejected",
-  { message: Schema.String }
-) {}
-
-export type AgentError = SessionNotFound | AgentUnavailable | InvalidConfigValue | PromptRejected
-
-const unavailable = (error: LettaError) => new AgentUnavailable({ message: error.message, auth: isAuthFailure(error) })
-
-/** Letta rejecting a config change means the value is invalid; any other failure means Letta is unavailable. */
-const configFailure = (configId: string, value: string) => (error: LettaError) =>
-  error._tag === "LettaRequestFailed" ? new InvalidConfigValue({ configId, value }) : unavailable(error)
+import {
+  configOptions,
+  decodePermissionMode,
+  initialSettings,
+  type SessionSettings,
+  Settings,
+  type Target
+} from "./Settings.ts"
 
 // ---------------------------------------------------------------------------
 // Public model
@@ -141,21 +110,6 @@ export interface SessionSummary {
 // Presentation constants
 // ---------------------------------------------------------------------------
 
-export const MODE_CONFIG_ID = "mode"
-export const MODEL_CONFIG_ID = "model"
-export const EFFORT_CONFIG_ID = "effort"
-
-const MODES: ReadonlyArray<{ readonly value: PermissionMode; readonly name: string; readonly description: string }> = [
-  { value: "standard", name: "Standard", description: "Ask before running tools that change files or run commands" },
-  {
-    value: "acceptEdits",
-    name: "Accept Edits",
-    description: "Apply file edits automatically; ask for everything else"
-  },
-  { value: "unrestricted", name: "Unrestricted", description: "Run every tool without asking" },
-  { value: "strict", name: "Strict", description: "Ask before every tool call" }
-]
-
 /** Letta built-in slash commands worth surfacing in an editor. */
 const BUILTIN_COMMANDS: Readonly<Record<string, string>> = {
   init: "Set up the agent's memory for this project",
@@ -177,10 +131,9 @@ const decodeLoopStatus = decode(LoopStatus)
 const decodeDeviceStatus = decode(DeviceStatus)
 const decodeQueueUpdate = decode(QueueUpdate)
 const decodeExternalToolCall = decode(ExternalToolCallRequest)
-const decodePermissionMode = decode(PermissionModeSchema)
 
 /** Letta stop reasons onto ACP stop reasons. */
-export const stopReasonOf = (reason: string): StopReason => {
+const stopReasonOf = (reason: string): StopReason => {
   switch (reason) {
     case "end_turn":
     case "no_tool_call":
@@ -240,14 +193,9 @@ interface Session {
   readonly turnLock: Semaphore.Semaphore
   readonly permissions: FiberSet.FiberSet<void, never>
   attachment: Option.Option<Attachment>
-  mode: Option.Option<PermissionMode>
-  /** The model handle. */
-  model: Option.Option<string>
-  /** The reasoning effort recorded in the conversation's model settings. */
-  effort: Option.Option<Models.Effort>
-  contextWindow: Option.Option<number>
+  /** Model, effort and mode. */
+  readonly settings: SessionSettings
   commands: ReadonlyArray<Command>
-  models: ReadonlyArray<Models.ModelChoice>
   readonly ownMessages: Set<string>
   /** Runs of turns lacp ended itself; their late frames are ignored. */
   readonly abandonedRuns: Set<string>
@@ -306,6 +254,7 @@ export class Agent extends Context.Service<Agent, {
       const config = yield* LacpConfig
       const host = yield* Host
       const appServer = yield* LettaAppServer
+      const settings = yield* Settings
       const client = yield* AcpClient
       const crypto = yield* Crypto
       const fs = yield* FileSystem.FileSystem
@@ -315,12 +264,17 @@ export class Agent extends Context.Service<Agent, {
       const layerScope = yield* Effect.scope
       const sessions = new Map<string, Session>()
       const agentsByCwd = new Map<string, string>()
-      const modelsByGeneration = new Map<number, ReadonlyArray<Models.ModelChoice>>()
 
       // A failing CSPRNG is not a recoverable condition.
       const uuid = crypto.randomUUIDv4().pipe(Effect.orDie)
 
       const connection = appServer.connection.pipe(Effect.mapError(unavailable))
+
+      const targetOf = (session: Session, attachment: Attachment): Target => ({
+        connection: attachment.connection,
+        runtime: attachment.runtime,
+        conversationId: session.id
+      })
 
       const getSession = (sessionId: string) =>
         Effect.suspend(() => {
@@ -337,86 +291,6 @@ export class Agent extends Context.Service<Agent, {
           if (session.foreground === state) return Effect.void
           session.foreground = state
           return emit(session, { _tag: "State", state })
-        })
-
-      // --- config options --------------------------------------------------
-
-      const currentChoice = (session: Session) =>
-        Option.flatMap(session.model, (handle) => Models.findChoice(session.models, handle, session.contextWindow))
-
-      /** Model, effort (when the model has levels to choose from) and mode, in that order. */
-      const configOptions = (session: Session): ReadonlyArray<ConfigOption> => {
-        const options: Array<ConfigOption> = []
-        const choice = currentChoice(session)
-        if (Option.isSome(session.model) || session.models.length > 0) {
-          const current = Option.match(choice, {
-            onSome: (c) => c.key,
-            onNone: () => Option.getOrElse(session.model, () => session.models[0]?.key ?? "")
-          })
-          const choices = Models.modelChoices(session.models)
-          if (!choices.some((c) => c.value === current)) choices.unshift({ value: current, name: current })
-          options.push({
-            id: MODEL_CONFIG_ID,
-            name: "Model",
-            category: "model",
-            currentValue: current,
-            options: choices
-          })
-        }
-        if (Option.isSome(choice) && choice.value.levels.length > 1) {
-          options.push({
-            id: EFFORT_CONFIG_ID,
-            name: "Effort",
-            description: "How much the model reasons before it answers",
-            category: "thought_level",
-            currentValue: Models.shownEffort(choice.value, session.effort) ?? "",
-            options: Models.effortChoices(choice.value)
-          })
-        }
-        options.push({
-          id: MODE_CONFIG_ID,
-          name: "Mode",
-          description: "When Letta Code asks before running tools",
-          category: "mode",
-          currentValue: Option.getOrElse(session.mode, () => "standard"),
-          options: MODES.map((m) => ({ value: m.value, name: m.name, description: m.description }))
-        })
-        return options
-      }
-
-      /**
-       * The model choices for a connection: `list_models`, with each model's
-       * effort levels from `letta model list` (which also covers models that
-       * have no presets). Cached per App Server generation.
-       */
-      const models = (connection: LettaConnection) =>
-        Effect.suspend(() => {
-          const cached = modelsByGeneration.get(connection.generation)
-          if (cached !== undefined) return Effect.succeed(cached)
-          const entries = connection.call((request_id) => ({ type: "list_models", request_id }), ListModelsResponse, {
-            timeout: "15 seconds"
-          }).pipe(
-            Effect.map((response) => Option.some(response.entries)),
-            Effect.catch((error) =>
-              Effect.logWarning(`Could not list Letta models: ${error.message}`).pipe(Effect.as(Option.none()))
-            )
-          )
-          const levels = appServer.cli(["model", "list"]).pipe(
-            Effect.map((output) => Option.getOrElse(Models.decodeModelList(output), () => [])),
-            Effect.catch((error) =>
-              Effect.logDebug(`Effort levels from \`letta model list\` are unavailable: ${error.message}`).pipe(
-                Effect.as([])
-              )
-            )
-          )
-          return Effect.all([entries, levels], { concurrency: "unbounded" }).pipe(
-            Effect.map(([listed, rows]) => {
-              const choices = Models.catalog(Option.getOrElse(listed, () => []), rows)
-              // A failed listing is retried by the next session instead of being cached.
-              if (Option.isSome(listed)) modelsByGeneration.set(connection.generation, choices)
-              return choices
-            })
-          )
         })
 
       const commandsFrom = (status: DeviceStatus["device_status"]): ReadonlyArray<Command> => [
@@ -472,10 +346,10 @@ export class Agent extends Context.Service<Agent, {
           if (Option.isSome(turn) && !turn.value.started) return
           const stopReason = stopReasonOf(frame.stop_reason)
           const message = frame.error ?? Option.getOrUndefined(Option.flatMap(turn, (t) => t.error))
-          if (frame.usage !== undefined && frame.usage !== null && Option.isSome(session.contextWindow)) {
+          if (frame.usage !== undefined && frame.usage !== null && Option.isSome(session.settings.contextWindow)) {
             const used = frame.usage.context_tokens ?? frame.usage.prompt_tokens
             if (used !== undefined && used !== null) {
-              yield* emit(session, { _tag: "Usage", used, size: session.contextWindow.value })
+              yield* emit(session, { _tag: "Usage", used, size: session.settings.contextWindow.value })
             }
           }
           yield* completeTurn(session, {
@@ -618,9 +492,9 @@ export class Agent extends Context.Service<Agent, {
       const onDeviceStatus = (session: Session, frame: DeviceStatus) =>
         Effect.gen(function*() {
           const status = frame.device_status
-          const before = configOptions(session)
+          const before = configOptions(session.settings)
           const mode = Option.flatMap(Option.fromUndefinedOr(status.current_permission_mode), decodePermissionMode)
-          if (Option.isSome(mode)) session.mode = mode
+          if (Option.isSome(mode)) session.settings.mode = mode
           const commands = commandsFrom(status)
           const commandsChanged = !Equal.equals(commands, session.commands)
           session.commands = commands
@@ -628,7 +502,7 @@ export class Agent extends Context.Service<Agent, {
           yield* Deferred.succeed(session.deviceStatus, undefined)
           if (firstReport) return
           if (commandsChanged) yield* emit(session, { _tag: "AvailableCommands", commands })
-          const after = configOptions(session)
+          const after = configOptions(session.settings)
           if (!Equal.equals(before, after)) yield* emit(session, { _tag: "ConfigOptions", options: after })
         })
 
@@ -800,11 +674,11 @@ export class Agent extends Context.Service<Agent, {
           tools: yield* session.mcp.tools
         })
         yield* attach(session, started, conn)
-        if (Option.isSome(session.mode) && Option.isNone(config.permissionMode)) {
+        if (Option.isSome(session.settings.mode) && Option.isNone(config.permissionMode)) {
           yield* conn.send({
             type: "change_device_state",
             runtime: started.runtime,
-            payload: { mode: session.mode.value }
+            payload: { mode: session.settings.mode.value }
           }).pipe(
             Effect.ignore
           )
@@ -829,24 +703,14 @@ export class Agent extends Context.Service<Agent, {
           translator: Translator.make({
             cwd: () => session.cwd,
             path,
-            contextWindow: () => session.contextWindow,
+            contextWindow: () => session.settings.contextWindow,
             externalTool: (name) => session.mcp.describe(name)
           }),
           turnLock: yield* Semaphore.make(1),
           permissions: yield* Scope.provide(FiberSet.make<void, never>(), scope),
           attachment: Option.none(),
-          mode: config.permissionMode,
-          model: Option.fromNullishOr(started.response.conversation?.model ?? started.response.agent?.model),
-          effort: Models.settingsEffort(
-            started.response.conversation?.model_settings ?? started.response.agent?.model_settings
-          ),
-          contextWindow: Option.fromNullishOr(
-            started.response.conversation?.model_settings?.context_window_limit ??
-              started.response.agent?.llm_config?.context_window ??
-              started.response.agent?.model_settings?.context_window_limit
-          ),
+          settings: initialSettings(started.response, yield* settings.catalog(conn), config.permissionMode),
           commands: [],
-          models: yield* models(conn),
           ownMessages: new Set(),
           abandonedRuns: new Set(),
           mcpServers,
@@ -876,9 +740,9 @@ export class Agent extends Context.Service<Agent, {
       /** Waits briefly for the runtime's first device status (mode and commands). */
       const settle = Effect.fnUntraced(function*(session: Session, attachment: Attachment) {
         const seen = yield* Deferred.await(session.deviceStatus).pipe(Effect.timeoutOption("5 seconds"))
-        if (Option.isNone(seen) && Option.isNone(session.mode)) {
+        if (Option.isNone(seen) && Option.isNone(session.settings.mode)) {
           // Never assume Letta's own default (unrestricted): ask before acting.
-          session.mode = Option.some("standard")
+          session.settings.mode = Option.some("standard")
           yield* attachment.connection.send({
             type: "change_device_state",
             runtime: attachment.runtime,
@@ -889,7 +753,7 @@ export class Agent extends Context.Service<Agent, {
 
       const setup = (session: Session): SessionSetup => ({
         sessionId: session.id,
-        configOptions: configOptions(session),
+        configOptions: configOptions(session.settings),
         commands: session.commands
       })
 
@@ -976,109 +840,6 @@ export class Agent extends Context.Service<Agent, {
         return Option.some(created.agent_id)
       })
 
-      /** Records what Letta applied, as reported in model settings. */
-      const recordSettings = (
-        session: Session,
-        handle: Option.Option<string>,
-        settings: ModelSettings | null | undefined
-      ) => {
-        if (Option.isSome(handle)) session.model = handle
-        const contextWindow = Option.fromNullishOr(settings?.context_window_limit)
-        if (Option.isSome(contextWindow)) session.contextWindow = contextWindow
-        session.effort = Models.settingsEffort(settings)
-      }
-
-      const updateModel = (
-        attachment: Attachment,
-        payload: { readonly model_id?: string; readonly model_handle?: string; readonly reasoning_effort?: string }
-      ) =>
-        attachment.connection.call(
-          (request_id) => ({ type: "update_model", request_id, runtime: attachment.runtime, payload }),
-          UpdateModelResponse,
-          { timeout: "60 seconds" }
-        )
-
-      /**
-       * Sets the effort of the session's model: through its preset when it has
-       * one, otherwise as a model setting (`letta model set --reasoning`, or
-       * `update_model` when lacp did not start the App Server).
-       */
-      const applyEffort = Effect.fnUntraced(function*(
-        session: Session,
-        attachment: Attachment,
-        choice: Models.ModelChoice,
-        effort: Models.Effort
-      ) {
-        const preset = Models.presetFor(choice, effort)
-        if (Option.isSome(preset)) {
-          const response = yield* updateModel(attachment, { model_id: preset.value, model_handle: choice.handle })
-          recordSettings(session, Option.some(response.model_handle ?? choice.handle), response.model_settings)
-          return
-        }
-        const viaCli = yield* appServer.cli(["model", "set", "--conversation", session.id, "--reasoning", effort]).pipe(
-          Effect.as(true),
-          Effect.catch((error) =>
-            Effect.logDebug(`\`letta model set\` failed, trying update_model: ${error.message}`).pipe(Effect.as(false))
-          )
-        )
-        if (!viaCli) {
-          const response = yield* updateModel(attachment, { model_handle: choice.handle, reasoning_effort: effort })
-          recordSettings(session, Option.some(response.model_handle ?? choice.handle), response.model_settings)
-          return
-        }
-        const retrieved = yield* attachment.connection.call(
-          (request_id) => ({ type: "conversation_retrieve", request_id, conversation_id: session.id }),
-          ConversationRetrieveResponse
-        )
-        recordSettings(session, Option.none(), retrieved.conversation?.model_settings)
-      })
-
-      /**
-       * Switches the session to `choice`, keeping the current effort when the
-       * new model supports it.
-       */
-      const applyModel = Effect.fnUntraced(function*(
-        session: Session,
-        attachment: Attachment,
-        choice: Models.ModelChoice
-      ) {
-        const wanted = session.effort
-        const response = yield* updateModel(attachment, {
-          model_id: Models.selectionId(choice, wanted),
-          model_handle: choice.handle
-        })
-        recordSettings(session, Option.some(response.model_handle ?? choice.handle), response.model_settings)
-        if (response.model_settings?.context_window_limit == null) session.contextWindow = choice.contextWindow
-        if (
-          Option.isSome(wanted) && choice.levels.includes(wanted.value) &&
-          !Option.contains(session.effort, wanted.value)
-        ) {
-          yield* applyEffort(session, attachment, choice, wanted.value).pipe(
-            Effect.catch((error) => Effect.logWarning(`Could not keep the ${wanted.value} effort: ${error.message}`))
-          )
-        }
-      })
-
-      const applyConfiguredModel = Effect.fnUntraced(function*(session: Session, attachment: Attachment) {
-        if (Option.isNone(config.model)) return
-        const wanted = config.model.value
-        const choice = Option.orElse(
-          Option.fromUndefinedOr(session.models.find((c) => c.key === wanted)),
-          () => Models.findChoice(session.models, wanted, Option.none())
-        )
-        if (Option.isSome(choice) && Option.contains(session.model, choice.value.handle)) return
-        if (Option.isNone(choice) && Option.contains(session.model, wanted)) return
-        yield* Option.match(choice, {
-          onSome: (c) => applyModel(session, attachment, c),
-          onNone: () =>
-            updateModel(attachment, { model_handle: wanted }).pipe(
-              Effect.map((response) =>
-                recordSettings(session, Option.some(response.model_handle ?? wanted), response.model_settings)
-              )
-            )
-        }).pipe(Effect.catch((error) => Effect.logWarning(`Could not apply LACP_MODEL=${wanted}: ${error.message}`)))
-      })
-
       // --- history ----------------------------------------------------------
 
       const replay = Effect.fnUntraced(function*(session: Session, conn: LettaConnection) {
@@ -1102,7 +863,7 @@ export class Agent extends Context.Service<Agent, {
         const history = Translator.make({
           cwd: () => session.cwd,
           path,
-          contextWindow: () => session.contextWindow,
+          contextWindow: () => session.settings.contextWindow,
           externalTool: (name) => session.mcp.describe(name)
         })
         for (const row of rows.toReversed()) yield* emitAll(session, history.history(row))
@@ -1111,36 +872,72 @@ export class Agent extends Context.Service<Agent, {
 
       // --- operations -------------------------------------------------------
 
+      /**
+       * Opens a session in a new scope: Letta and the client's MCP servers
+       * connect concurrently, `pick` chooses the agent and conversation, and the
+       * runtime starts with the MCP tools. Replayed history comes before the
+       * session goes live. The scope is closed again if opening fails.
+       */
+      const openSession = <P extends { readonly agentId: string; readonly conversationId: Option.Option<string> }, E>(
+        input: { readonly cwd: string; readonly mcpServers: ReadonlyArray<McpServerConfig>; readonly replay: boolean },
+        pick: (conn: LettaConnection) => Effect.Effect<P, E>
+      ) =>
+        Effect.gen(function*() {
+          const scope = yield* Scope.fork(layerScope)
+          return yield* Effect.gen(function*() {
+            const [conn, mcp] = yield* Effect.all([connection, connectMcp(input.mcpServers, input.cwd, scope)], {
+              concurrency: "unbounded"
+            })
+            const picked = yield* pick(conn)
+            const started = yield* startRuntime(conn, scope, {
+              agentId: picked.agentId,
+              conversationId: picked.conversationId,
+              cwd: input.cwd,
+              tools: yield* mcp.tools
+            })
+            const session = yield* makeSession(conn, scope, mcp, input.mcpServers, picked.agentId, input.cwd, started)
+            if (input.replay) yield* replay(session, conn)
+            yield* attach(session, started, conn)
+            const attachment = Option.getOrThrow(session.attachment)
+            yield* settle(session, attachment)
+            return { session, attachment, mcp, picked }
+          }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
+        })
+
       const newSession = Effect.fn("Agent.newSession")(function*(input: {
         readonly cwd: string
         readonly mcpServers: ReadonlyArray<McpServerConfig>
       }) {
-        const scope = yield* Scope.fork(layerScope)
-        return yield* Effect.gen(function*() {
-          // Letta and the client's MCP servers start concurrently.
-          const [conn, mcp] = yield* Effect.all([connection, connectMcp(input.mcpServers, input.cwd, scope)], {
-            concurrency: "unbounded"
-          })
-          const agentId = yield* resolveAgent(conn, input.cwd, true).pipe(Effect.map(Option.getOrThrow))
-          const started = yield* startRuntime(conn, scope, {
-            agentId,
-            conversationId: Option.none(),
-            cwd: input.cwd,
-            tools: yield* mcp.tools
-          })
-          const session = yield* makeSession(conn, scope, mcp, input.mcpServers, agentId, input.cwd, started)
-          yield* attach(session, started, conn)
-          const attachment = Option.getOrThrow(session.attachment)
-          yield* settle(session, attachment)
-          yield* applyConfiguredModel(session, attachment)
-          yield* announce(session)
-          yield* Effect.logInfo(
-            `Started session ${session.id} (agent ${agentId}) in ${input.cwd}` +
-              (mcp.connected.length > 0 ? ` with MCP servers: ${mcp.connected.join(", ")}` : "")
-          )
-          return setup(session)
-        }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
+        const { attachment, mcp, session } = yield* openSession(
+          { ...input, replay: false },
+          (conn) =>
+            resolveAgent(conn, input.cwd, true).pipe(
+              Effect.map((agentId) => ({ agentId: Option.getOrThrow(agentId), conversationId: Option.none<string>() }))
+            )
+        )
+        yield* settings.applyConfiguredModel(session.settings, targetOf(session, attachment))
+        yield* announce(session)
+        yield* Effect.logInfo(
+          `Started session ${session.id} (agent ${session.agentId}) in ${input.cwd}` +
+            (mcp.connected.length > 0 ? ` with MCP servers: ${mcp.connected.join(", ")}` : "")
+        )
+        return setup(session)
       })
+
+      /** The stored conversation behind a session id, and its agent. */
+      const storedConversation = (conn: LettaConnection, sessionId: string, cwd: string) =>
+        Effect.gen(function*() {
+          const notFound = new SessionNotFound({ sessionId })
+          const retrieved = yield* conn.call(
+            (request_id) => ({ type: "conversation_retrieve", request_id, conversation_id: sessionId }),
+            ConversationRetrieveResponse
+          ).pipe(Effect.mapError(() => notFound))
+          const conversation = retrieved.conversation
+          if (conversation === null) return yield* notFound
+          const agentId = conversation.agent_id ?? Option.getOrUndefined(yield* resolveAgent(conn, cwd, false))
+          if (agentId === undefined) return yield* notFound
+          return { agentId, conversationId: Option.some(sessionId), conversation }
+        })
 
       const loadSession = Effect.fn("Agent.loadSession")(function*(input: {
         readonly sessionId: string
@@ -1161,40 +958,20 @@ export class Agent extends Context.Service<Agent, {
           yield* announce(existing)
           return setup(existing)
         }
-        const scope = yield* Scope.fork(layerScope)
-        return yield* Effect.gen(function*() {
-          const [conn, mcp] = yield* Effect.all([connection, connectMcp(input.mcpServers, input.cwd, scope)], {
-            concurrency: "unbounded"
+        const { picked: { conversation }, session } = yield* openSession(
+          input,
+          (conn) => storedConversation(conn, input.sessionId, input.cwd)
+        )
+        const title = conversation.summary ?? conversation.description
+        if (title !== undefined && title !== null && title !== "") {
+          yield* emit(session, {
+            _tag: "SessionInfo",
+            title,
+            ...(conversation.last_message_at ? { updatedAt: conversation.last_message_at } : {})
           })
-          const retrieved = yield* conn.call(
-            (request_id) => ({ type: "conversation_retrieve", request_id, conversation_id: input.sessionId }),
-            ConversationRetrieveResponse
-          ).pipe(Effect.mapError(() => new SessionNotFound({ sessionId: input.sessionId })))
-          const conversation = retrieved.conversation
-          if (conversation === null) return yield* new SessionNotFound({ sessionId: input.sessionId })
-          const agentId = conversation.agent_id ?? Option.getOrUndefined(yield* resolveAgent(conn, input.cwd, false))
-          if (agentId === undefined) return yield* new SessionNotFound({ sessionId: input.sessionId })
-          const started = yield* startRuntime(conn, scope, {
-            agentId,
-            conversationId: Option.some(input.sessionId),
-            cwd: input.cwd,
-            tools: yield* mcp.tools
-          })
-          const session = yield* makeSession(conn, scope, mcp, input.mcpServers, agentId, input.cwd, started)
-          if (input.replay) yield* replay(session, conn)
-          yield* attach(session, started, conn)
-          yield* settle(session, Option.getOrThrow(session.attachment))
-          const title = conversation.summary ?? conversation.description
-          if (title !== undefined && title !== null && title !== "") {
-            yield* emit(session, {
-              _tag: "SessionInfo",
-              title,
-              ...(conversation.last_message_at ? { updatedAt: conversation.last_message_at } : {})
-            })
-          }
-          yield* announce(session)
-          return setup(session)
-        }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
+        }
+        yield* announce(session)
+        return setup(session)
       })
 
       const listSessions = Effect.fn("Agent.listSessions")(function*(input: {
@@ -1398,44 +1175,8 @@ export class Agent extends Context.Service<Agent, {
         function*(sessionId: string, configId: string, value: string) {
           const session = yield* getSession(sessionId)
           const attachment = yield* ensureAttached(session)
-          if (configId === MODE_CONFIG_ID) {
-            const mode = decodePermissionMode(value)
-            if (Option.isNone(mode)) return yield* new InvalidConfigValue({ configId, value })
-            yield* attachment.connection.send({
-              type: "change_device_state",
-              runtime: attachment.runtime,
-              payload: { mode: mode.value }
-            }).pipe(
-              Effect.mapError(unavailable)
-            )
-            session.mode = mode
-          } else if (configId === MODEL_CONFIG_ID) {
-            const choice = Option.orElse(
-              Option.fromUndefinedOr(session.models.find((c) => c.key === value)),
-              () => Models.findChoice(session.models, value, Option.none())
-            )
-            if (Option.isNone(choice)) return yield* new InvalidConfigValue({ configId, value })
-            yield* applyModel(session, attachment, choice.value).pipe(Effect.mapError(configFailure(configId, value)))
-          } else if (configId === EFFORT_CONFIG_ID) {
-            const choice = currentChoice(session)
-            const effort = Models.decodeEffort(value)
-            if (Option.isNone(choice) || Option.isNone(effort) || !choice.value.levels.includes(effort.value)) {
-              return yield* new InvalidConfigValue({ configId, value })
-            }
-            yield* applyEffort(session, attachment, choice.value, effort.value).pipe(
-              Effect.mapError(configFailure(configId, value))
-            )
-            if (!Option.contains(session.effort, effort.value)) {
-              yield* Effect.logWarning(
-                `Asked Letta for ${effort.value} effort on ${choice.value.handle}; it reports ${
-                  Option.getOrElse(session.effort, () => "none recorded")
-                }`
-              )
-            }
-          } else {
-            return yield* new InvalidConfigValue({ configId, value })
-          }
-          const options = configOptions(session)
+          yield* settings.set(session.settings, targetOf(session, attachment), configId, value)
+          const options = configOptions(session.settings)
           yield* emit(session, { _tag: "ConfigOptions", options })
           return options
         }

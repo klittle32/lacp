@@ -16,7 +16,7 @@ import { connect, type ConnectOptions, type McpConnection } from "./McpClient.ts
 import * as Mcp from "./Protocol.ts"
 
 /** Letta waits at most this long (its maximum) for one tool call. */
-export const TOOL_TIMEOUT_MS = 300_000
+const TOOL_TIMEOUT_MS = 300_000
 const MAX_NAME = 64
 
 export interface McpFailure {

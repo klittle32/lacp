@@ -159,6 +159,13 @@ export const findChoice = (
     ) ?? choices.find((c) => c.handle === handle)
   )
 
+/** The choice a config value names: its key, or a model handle. */
+export const choiceFor = (choices: ReadonlyArray<ModelChoice>, keyOrHandle: string): Option.Option<ModelChoice> =>
+  Option.orElse(
+    Option.fromUndefinedOr(choices.find((c) => c.key === keyOrHandle)),
+    () => findChoice(choices, keyOrHandle, Option.none())
+  )
+
 export const presetFor = (choice: ModelChoice, effort: Effort): Option.Option<string> =>
   Option.fromUndefinedOr(choice.presets.find((p) => p.effort === effort)?.id)
 
