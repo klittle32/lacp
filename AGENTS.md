@@ -32,6 +32,7 @@ npm run lint       # oxlint (Effect presets) + dprint check
 npm run lint-fix   # oxlint --fix + dprint fmt
 npm test           # vitest
 LACP_E2E_LETTA="$(command -v letta)" npm test   # also run end-to-end tests against a real Letta Code
+npm run smoke:t3   # drive this checkout in a real T3 Code nightly (Chrome; see scripts/t3-smoke.ts)
 ```
 
 Run `npm run check && npm run lint && npm test` before committing.

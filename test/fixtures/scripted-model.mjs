@@ -2,7 +2,7 @@
 // port (printed on stdout). Letta Code reaches it as an LM Studio endpoint.
 //
 // - "SPAWN_WORKER" makes the agent start a background subagent with the Agent tool.
-// - The subagent ("WORKER_TASK") answers after a short delay.
+// - The subagent ("WORKER_TASK") answers after SCRIPTED_MODEL_WORKER_MS (default 1500).
 // - The follow-up turn Letta runs with the subagent's <task-notification> reports.
 // - Anything else (titles, reflection) gets "ok".
 import http from "node:http"
@@ -30,7 +30,7 @@ const reply = async (body) => {
     return [{ reasoning_content: "The worker finished." }, { content: "Here is the listing: a.txt b.txt" }]
   }
   if (user.includes("WORKER_TASK")) {
-    await sleep(1500)
+    await sleep(Number(process.env.SCRIPTED_MODEL_WORKER_MS ?? 1500))
     return [{ content: "a.txt b.txt" }]
   }
   if (user.includes("SPAWN_WORKER")) {

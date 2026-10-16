@@ -54,6 +54,14 @@
   "overrides": [
     {
       "files": [
+        "scripts/**"
+      ],
+      "rules": {
+        "effecttsgo/strict-effect-provide": "off"
+      }
+    },
+    {
+      "files": [
         "test/**",
         "src/main.ts"
       ],

@@ -217,6 +217,18 @@ End-to-end tests drive a real Letta Code with its offline deterministic backend 
 LACP_E2E_LETTA="$(command -v letta)" npm test
 ```
 
+A smoke test runs this checkout in a real T3 Code. It installs a T3 Code release (the nightly by default, kept in
+`~/.cache/lacp/t3-smoke`), adds `lacp` as a Local ACP command on Letta Code's local backend with a scripted model,
+and drives T3's web UI in your Chrome. It checks that a background subagent's report appears and the turn ends on
+its own, and that Stop ends a turn waiting for one. Screenshots, `lacp.log` and T3's output go to the directory it
+prints (macOS and Linux):
+
+```sh
+npm run smoke:t3
+T3_SMOKE_VERSION=0.1.1-nightly.20261016.3218 npm run smoke:t3   # a specific release
+T3_SMOKE_BROWSER=/path/to/chromium npm run smoke:t3              # without Google Chrome
+```
+
 In VS Code, install the TypeScript 7 (native preview) extension to get the Effect Language Service in the editor;
 `.vscode/settings.json` already points at the workspace TypeScript.
 

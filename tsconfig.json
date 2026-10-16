@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/@effect/tsgo/schema.json",
-  "include": ["src", "test", "vitest.config.ts"],
+  "include": ["src", "test", "scripts", "vitest.config.ts"],
   "compilerOptions": {
     "target": "ES2023",
     "lib": ["ES2023"],
