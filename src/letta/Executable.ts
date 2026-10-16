@@ -262,7 +262,9 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
         const choice = yield* runtime
         const install: LettaInstall = {
           command: choice.path,
-          prefixArgs: [script.value],
+          // Bun loads `.env` from the working directory by default, which could add
+          // variables (even LETTA_API_KEY) that lacp did not pass. Node never does.
+          prefixArgs: choice.runtime === "bun" ? ["--no-env-file", script.value] : [script.value],
           version: "unknown",
           path: candidate.path,
           source: candidate.source,

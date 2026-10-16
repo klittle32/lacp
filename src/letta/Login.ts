@@ -9,6 +9,7 @@
  */
 import { Effect, FileSystem, Option, Path, Predicate, Schema } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
+import type { AuthMode } from "../Config.ts"
 
 const KEYCHAIN_SERVICE = "letta-code"
 const KEYCHAIN_ACCOUNTS = ["letta-refresh-token", "letta-api-key"]
@@ -20,6 +21,29 @@ const Settings = Schema.Struct({
 const decodeSettings = Schema.decodeUnknownOption(Schema.fromJsonString(Settings))
 
 const isNonEmptyString = (value: unknown) => Predicate.isString(value) && value !== ""
+
+/**
+ * Which credential Letta Code ends up with when `LETTA_API_KEY` is set:
+ * Letta Code prefers it to the stored login, unless lacp removes it.
+ */
+export const environmentKeyNote = (
+  auth: AuthMode,
+  env: Readonly<Record<string, string | undefined>>
+): Option.Option<string> => {
+  if (!isNonEmptyString(env["LETTA_API_KEY"])) return Option.none()
+  if (auth === "host") {
+    return Option.some(
+      "LETTA_API_KEY is set in this environment, and Letta Code uses it ahead of your Letta login " +
+        "(set LACP_AUTH=cloud-oauth to use the login instead)"
+    )
+  }
+  if (auth === "cloud-oauth") {
+    return Option.some(
+      "LETTA_API_KEY is set, but LACP_AUTH=cloud-oauth keeps it from Letta Code, so your Letta login is used"
+    )
+  }
+  return Option.none()
+}
 
 /** Letta Code's global settings file for a HOME. */
 export const settingsPath = (path: Path.Path, home: string) => path.join(home, ".letta", "settings.json")

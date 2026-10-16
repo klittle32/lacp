@@ -216,6 +216,7 @@ const loginReport = Effect.fnUntraced(function*(auth: AuthMode, runtime: LettaIn
     : "not in ~/.letta/settings.json (it may be in the system keychain, which Letta Code reads only under Bun)"
   return [
     `login: ${where}`,
+    ...Option.toArray(Login.environmentKeyNote(auth, host.env)).map((note) => `note: ${note}`),
     ...(runtime === "node" && !inFile && keychain === true
       ? ["warning: Letta Code under Node cannot read the keychain; set LACP_LETTA_RUNTIME=bun (or auto)"]
       : []),

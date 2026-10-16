@@ -69,6 +69,11 @@ Letta agent to talk to. Everything can be set through environment variables in y
 
 Self-hosted Letta servers work through Letta Code's own `LETTA_BASE_URL` setting.
 
+Letta Code uses `LETTA_API_KEY` from its environment ahead of your stored login. With the default `LACP_AUTH=host`,
+a key that reaches `lacp` therefore wins; `LACP_AUTH=cloud-oauth` removes it so your login is used. Editors started
+from the macOS Dock usually do not see variables exported in your shell profile, so only a key set in the editor's
+agent settings reaches `lacp` there. `lacp doctor` notes when the key is set.
+
 ### Node or Bun
 
 Letta Code keeps your Letta Cloud login in a different place depending on what runs it. Under **Bun** it is in the
@@ -83,7 +88,8 @@ Code's `letta.js` with the runtime that can see your login:
 `lacp doctor` shows the runtime it picked, why, and where your login is. `lacp` itself runs on Node either way; this
 setting only decides what runs Letta Code. It applies when `letta` is an npm or Bun install (a link to `letta.js`).
 For other launchers (Volta or pnpm shims, `letta.cmd` on Windows), set `LACP_LETTA_PATH` to the `letta.js` file to
-choose the runtime.
+choose the runtime. Under Bun, `lacp` passes `--no-env-file`, so Letta Code does not load a `.env` file from the
+directory it starts in: its environment is exactly what `lacp` passes, as under Node.
 
 ### Zed
 

@@ -28,6 +28,7 @@ import { type AuthMode, LacpConfig } from "../Config.ts"
 import { Host } from "../Host.ts"
 import { LettaDisconnected, type LettaError, LettaRequestFailed, LettaStartFailed } from "./Errors.ts"
 import { LettaExecutable, type LettaInstall } from "./Executable.ts"
+import * as Login from "./Login.ts"
 import {
   AppServerInfo,
   type Command,
@@ -138,6 +139,8 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
         function*(install: LettaInstall, exited: Deferred.Deferred<never, LettaDisconnected>) {
           const args = [...install.prefixArgs, ...BACKEND_ARGS[config.auth], "server", "--listen", "ws://127.0.0.1:0"]
           yield* Effect.logInfo(`Starting Letta Code App Server: ${install.command} ${args.join(" ")}`)
+          const keyNote = Login.environmentKeyNote(config.auth, host.env)
+          if (Option.isSome(keyNote)) yield* Effect.logInfo(keyNote.value)
           const handle = yield* spawner.spawn(
             ChildProcess.make(install.command, args, {
               cwd: host.cwd,
