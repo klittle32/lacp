@@ -30,6 +30,7 @@ src/
 │   ├── Login.ts          where Letta Code's login lives (settings file or keychain)
 │   ├── AppServer.ts      spawns `letta server --listen`, WebSocket client, request correlation, restarts
 │   ├── Protocol.ts       schemas for App Server commands and frames
+│   ├── Models.ts         Letta's models → model choices with effort levels; how a change is applied
 │   ├── Translator.ts     stream deltas / history rows → domain events
 │   ├── Tools.ts          tool-call presentation (titles, kinds, locations, diffs, plans)
 │   └── Errors.ts
@@ -72,6 +73,25 @@ ws://127.0.0.1:0` with the host's environment (minus ambient Letta session varia
 sessions subscribe to _before_ starting their runtime, so no replayed state is missed. If the process exits or the
 socket drops, active turns end with an error and the next use starts a new App Server; sessions see the new
 `generation` and re-attach their runtimes.
+
+## Models and effort
+
+`Agent` offers three config options: model, effort (`thought_level`) and mode. `letta/Models.ts` builds the model
+choices from `list_models`, one per handle and context window, and takes each model's effort levels from
+`letta model list` (run once per App Server, through `LettaAppServer.cli`), falling back to the levels of its
+presets when that is unavailable.
+
+Letta Code expresses effort in two ways, and `Agent` applies a change accordingly:
+
+- Hosted models have one catalog preset per effort level: `update_model` with the preset's `model_id`.
+- Models from the user's own providers, a ChatGPT subscription or the local backend report their levels instead:
+  `letta model set --conversation <id> --reasoning <level>`, which uses Letta's own per-provider translation, and
+  then `conversation_retrieve` to read the result back. `update_model` with `reasoning_effort` is the fallback when
+  lacp did not start the App Server.
+
+The current effort is read from the conversation's `model_settings`. A model switch selects the preset for the
+current effort, else the medium one (Letta resolves a bare handle to its first preset, often `none`), and then
+re-applies the effort if the new model supports it as a setting.
 
 ## Client MCP servers
 

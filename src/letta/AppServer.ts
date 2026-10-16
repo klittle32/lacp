@@ -108,6 +108,12 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
   readonly connection: Effect.Effect<LettaConnection, LettaError>
   /** Starts the App Server in the background so the first session is fast. */
   readonly warmup: Effect.Effect<void>
+  /**
+   * Runs a `letta` subcommand (e.g. `model list`) with the App Server's install,
+   * runtime and environment, and returns its stdout. Unavailable when lacp
+   * connects to an App Server it did not start.
+   */
+  cli(args: ReadonlyArray<string>): Effect.Effect<string, LettaRequestFailed>
 }>()("lacp/letta/LettaAppServer") {
   static readonly layer = Layer.effect(
     LettaAppServer,
@@ -391,13 +397,57 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
         Effect.asVoid
       )
 
-      return LettaAppServer.of({ connection, warmup })
+      const cli = (args: ReadonlyArray<string>) => {
+        const command = `letta ${args.join(" ")}`
+        const failed = (message: string) => new LettaRequestFailed({ command, message })
+        return Effect.gen(function*() {
+          if (Option.isSome(config.appServerUrl)) {
+            return yield* failed("not available when connecting to LACP_APP_SERVER_URL")
+          }
+          const install = yield* executable.resolve.pipe(Effect.mapError((error) => failed(error.message)))
+          const handle = yield* spawner.spawn(
+            ChildProcess.make(install.command, [...install.prefixArgs, ...BACKEND_ARGS[config.auth], ...args], {
+              cwd: host.cwd,
+              env: childEnv(),
+              extendEnv: false,
+              shell: host.platform === "win32" && install.command.endsWith(".cmd"),
+              stdin: "ignore",
+              stdout: "pipe",
+              stderr: "pipe"
+            })
+          )
+          const [stdout, stderr, code] = yield* Effect.all([
+            handle.stdout.pipe(Stream.decodeText(), Stream.mkString),
+            handle.stderr.pipe(Stream.decodeText(), Stream.mkString),
+            handle.exitCode
+          ], { concurrency: "unbounded" })
+          if (code !== 0) {
+            return yield* failed(
+              stderr.trim().split("\n").findLast((line) => line.trim() !== "") ?? `exit code ${code}`
+            )
+          }
+          return stdout
+        }).pipe(
+          Effect.scoped,
+          Effect.timeoutOrElse({ duration: "60 seconds", orElse: () => Effect.fail(failed("timed out")) }),
+          Effect.catchTag("PlatformError", (error) => Effect.fail(failed(error.message)))
+        )
+      }
+
+      return LettaAppServer.of({ connection, warmup, cli })
     })
   )
 
   /** A server backed by an already-established connection (for tests). */
-  static readonly layerConnection = (connection: LettaConnection) =>
-    Layer.succeed(LettaAppServer, LettaAppServer.of({ connection: Effect.succeed(connection), warmup: Effect.void }))
+  static readonly layerConnection = (
+    connection: LettaConnection,
+    cli: (args: ReadonlyArray<string>) => Effect.Effect<string, LettaRequestFailed> = (args) =>
+      Effect.fail(new LettaRequestFailed({ command: `letta ${args.join(" ")}`, message: "not available" }))
+  ) =>
+    Layer.succeed(
+      LettaAppServer,
+      LettaAppServer.of({ connection: Effect.succeed(connection), warmup: Effect.void, cli })
+    )
 }
 
 /** Provides the WebSocket constructor (Node >= 22 ships a global `WebSocket`). */

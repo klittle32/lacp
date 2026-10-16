@@ -89,7 +89,8 @@ describe("ACP v1 sessions", () => {
       const { client, created } = yield* setup(fake)
       assert.strictEqual(created.result.sessionId, "conv-1")
       assert.strictEqual(created.result.modes.currentModeId, "standard")
-      const [mode, model] = created.result.configOptions
+      const [model, effort, mode] = created.result.configOptions
+      assert.strictEqual(effort.id, "effort")
       assert.strictEqual(mode.id, "mode")
       assert.strictEqual(mode.category, "mode")
       assert.strictEqual(model.id, "model")
@@ -283,9 +284,9 @@ describe("ACP v1 sessions", () => {
         configId: "model",
         value: "openai/gpt-5"
       })
-      assert.strictEqual(model.result.configOptions[1].currentValue, "openai/gpt-5")
+      assert.strictEqual(model.result.configOptions[0].currentValue, "openai/gpt-5")
       const update = (yield* fake.waitFor((c) => c.type === "update_model")) as any
-      assert.deepStrictEqual(update.payload, { model_handle: "openai/gpt-5" })
+      assert.deepStrictEqual(update.payload, { model_id: "openai/gpt-5", model_handle: "openai/gpt-5" })
 
       const bad = yield* client.request("session/set_config_option", { sessionId, configId: "mode", value: "yolo" })
       assert.strictEqual(bad.error?.code, -32602)
@@ -395,7 +396,7 @@ describe("ACP v2 sessions", () => {
   it.live("returns availableCommands and v2 config options from session/new", () =>
     Effect.gen(function*() {
       const { created } = yield* setup(yield* Fake.make)
-      assert.deepStrictEqual(created.result.configOptions.map((o: any) => o.configId), ["mode", "model"])
+      assert.deepStrictEqual(created.result.configOptions.map((o: any) => o.configId), ["model", "effort", "mode"])
       assert.deepStrictEqual(created.result.availableCommands[2], {
         name: "plan",
         description: "Toggle plan mode",
@@ -531,7 +532,7 @@ describe("ACP v2 sessions", () => {
         cwd: "/work",
         replayFrom: { type: "start" }
       })
-      assert.deepStrictEqual(resumed.result.configOptions.map((o: any) => o.configId), ["mode", "model"])
+      assert.deepStrictEqual(resumed.result.configOptions.map((o: any) => o.configId), ["model", "effort", "mode"])
       const updates = yield* client.updates
       assert.deepStrictEqual(updates.slice(0, 2), [
         { sessionUpdate: "agent_message_chunk", messageId: "m1", content: { type: "text", text: "Earlier answer" } },

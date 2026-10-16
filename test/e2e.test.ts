@@ -69,7 +69,10 @@ describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
       const created = yield* client.request("session/new", { cwd })
       const sessionId = created.result.sessionId as string
       assert.isString(sessionId)
-      assert.strictEqual(created.result.configOptions[0].currentValue, "standard")
+      assert.strictEqual(
+        created.result.configOptions.find((o: any) => o.configId === "mode")?.currentValue,
+        "standard"
+      )
 
       const first = yield* client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] })
       assert.isString(first.result.messageId)

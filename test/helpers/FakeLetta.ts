@@ -13,6 +13,10 @@ export type Handler = (command: Command) => unknown
 
 export interface FakeLetta {
   readonly connection: LettaConnection
+  /** Stands in for `letta <args>` (`model list` and `model set`). */
+  readonly cli: (args: ReadonlyArray<string>) => Effect.Effect<string, LettaRequestFailed>
+  /** Every `letta` subcommand run, in order. */
+  readonly cliCalls: Ref.Ref<ReadonlyArray<ReadonlyArray<string>>>
   /** Every command sent or called, in order. */
   readonly commands: Ref.Ref<ReadonlyArray<Command>>
   /** Publishes a frame to subscribers. */
@@ -25,6 +29,50 @@ export interface FakeLetta {
 
 export const AGENT_ID = "agent-test"
 export const MODEL = "anthropic/claude-sonnet-4-5"
+/** A model without effort presets: its levels come from `letta model list`. */
+export const BYOK_MODEL = "openai/gpt-5"
+
+const preset = (effort: string) => ({
+  id: `sonnet-${effort}`,
+  handle: MODEL,
+  label: "Claude Sonnet",
+  description: "Balanced",
+  updateArgs: { reasoning_effort: effort, context_window: 200_000 }
+})
+
+interface FakeModelEntry {
+  readonly id: string
+  readonly handle: string
+  readonly label: string
+  readonly description: string | null
+  readonly updateArgs?: { readonly reasoning_effort: string; readonly context_window: number }
+}
+
+/** `list_models`: Sonnet as three effort presets, GPT-5 as one entry. */
+export const MODEL_ENTRIES: ReadonlyArray<FakeModelEntry> = [
+  preset("low"),
+  preset("medium"),
+  preset("high"),
+  { id: BYOK_MODEL, handle: BYOK_MODEL, label: "GPT-5", description: null }
+]
+
+/** `letta model list`. */
+export const MODEL_LIST = [
+  ...["low", "medium", "high"].map((effort) => ({
+    id: `sonnet-${effort}`,
+    handle: MODEL,
+    label: "Claude Sonnet",
+    context_window_limit: 200_000,
+    reasoning_levels: ["low", "medium", "high"]
+  })),
+  {
+    id: BYOK_MODEL,
+    handle: BYOK_MODEL,
+    label: "GPT-5",
+    context_window_limit: 400_000,
+    reasoning_levels: ["minimal", "low", "medium", "high"]
+  }
+]
 
 export const runtime = (conversationId: string) => ({ agent_id: AGENT_ID, conversation_id: conversationId })
 
@@ -66,6 +114,10 @@ export const make = Effect.gen(function*() {
   const commands = yield* Ref.make<ReadonlyArray<Command>>([])
   const sent = yield* PubSub.unbounded<Command>()
   const conversations = { next: 1 }
+  /** Model settings per conversation, as Letta would store them. */
+  const settings = new Map<string, Record<string, unknown>>()
+  const settingsOf = (id: string) => settings.get(id) ?? { reasoning_effort: "medium", context_window_limit: 200_000 }
+  const cliCalls = yield* Ref.make<ReadonlyArray<ReadonlyArray<string>>>([])
 
   const emit = (frame: Record<string, unknown>) =>
     Schema.decodeUnknownEffect(FrameHeader)(frame).pipe(
@@ -84,22 +136,29 @@ export const make = Effect.gen(function*() {
         success: true,
         runtime: { agent_id: c.agent_id, conversation_id: id },
         agent: { id: c.agent_id, name: "Test", model: MODEL, llm_config: { model: "claude", context_window: 200_000 } },
-        conversation: { id, agent_id: c.agent_id, summary: c.conversation_id === undefined ? null : "Earlier work" },
+        conversation: {
+          id,
+          agent_id: c.agent_id,
+          summary: c.conversation_id === undefined ? null : "Earlier work",
+          model: MODEL,
+          model_settings: settingsOf(id)
+        },
         created: { agent: false, conversation: c.conversation_id === undefined }
       }
     },
     input: () => ({ success: true, accepted: true, disposition: "started" }),
-    list_models: () => ({
-      success: true,
-      entries: [
-        { id: "sonnet", handle: MODEL, label: "Claude Sonnet", description: "Balanced" },
-        { id: "gpt", handle: "openai/gpt-5", label: "GPT-5", description: null }
-      ]
-    }),
-    update_model: (command) => ({
-      success: true,
-      model_handle: (command as Extract<Command, { type: "update_model" }>).payload.model_handle
-    }),
+    list_models: () => ({ success: true, entries: MODEL_ENTRIES }),
+    update_model: (command) => {
+      const c = command as Extract<Command, { type: "update_model" }>
+      const entry = MODEL_ENTRIES.find((e) => e.id === c.payload.model_id)
+      const handle = entry?.handle ?? c.payload.model_handle
+      const applied = {
+        reasoning_effort: entry?.updateArgs?.reasoning_effort ?? c.payload.reasoning_effort ?? "medium",
+        context_window_limit: entry?.updateArgs?.context_window ?? (handle === BYOK_MODEL ? 400_000 : 200_000)
+      }
+      settings.set(c.runtime.conversation_id, applied)
+      return { success: true, model_id: entry?.id ?? null, model_handle: handle, model_settings: applied }
+    },
     agent_retrieve: (command) => ({
       success: true,
       agent: { id: (command as Extract<Command, { type: "agent_retrieve" }>).agent_id }
@@ -109,7 +168,10 @@ export const make = Effect.gen(function*() {
       const id = (command as Extract<Command, { type: "conversation_retrieve" }>).conversation_id
       return id === "missing"
         ? { success: false, conversation: null, error: "not found" }
-        : { success: true, conversation: { id, agent_id: AGENT_ID, summary: "Earlier work" } }
+        : {
+          success: true,
+          conversation: { id, agent_id: AGENT_ID, summary: "Earlier work", model_settings: settingsOf(id) }
+        }
     },
     conversation_messages_list: () => ({ success: true, messages: [], has_more: false, next_before: null }),
     conversation_list: () => ({
@@ -182,8 +244,24 @@ export const make = Effect.gen(function*() {
       }
     }).pipe(Effect.scoped)
 
+  const cli = (args: ReadonlyArray<string>) =>
+    Ref.update(cliCalls, (all) => [...all, args]).pipe(
+      Effect.andThen(Effect.suspend(() => {
+        if (args[0] === "model" && args[1] === "list") return Effect.succeed(JSON.stringify(MODEL_LIST))
+        const flag = (name: string) => args[args.indexOf(name) + 1]
+        if (args[0] === "model" && args[1] === "set") {
+          const conversation = flag("--conversation") ?? ""
+          settings.set(conversation, { ...settingsOf(conversation), reasoning_effort: flag("--reasoning") })
+          return Effect.succeed("{}")
+        }
+        return Effect.fail(new LettaRequestFailed({ command: args.join(" "), message: "unsupported" }))
+      }))
+    )
+
   const fake: FakeLetta = {
     connection,
+    cli,
+    cliCalls,
     commands,
     emit,
     on: (type, handler) => Effect.sync(() => handlers.set(type, handler)),

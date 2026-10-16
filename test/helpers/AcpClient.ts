@@ -56,7 +56,7 @@ export const allowOnce: PermissionPolicy = (params) => ({
 
 /** Starts a full server (real AcpServer/Agent/peer) wired to `fake`, and a client for it. */
 export const start = (fake: FakeLetta, config: Partial<LacpConfigShape> = {}) =>
-  startWith(LettaAppServer.layerConnection(fake.connection), {
+  startWith(LettaAppServer.layerConnection(fake.connection, fake.cli), {
     config,
     host: { home: "/nonexistent-home", cwd: "/work" }
   })

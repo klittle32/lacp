@@ -16,7 +16,8 @@ as they are in your terminal.
   restarted transparently if it dies.
 - **Editor-native experience.** Streaming answers and reasoning, tool calls with diffs and file locations, shell
   commands as terminals, permission prompts (including Letta's "always allow" rules), plans, slash commands
-  (including mod commands), mode and model switching, session list / load / resume with history replay, usage.
+  (including mod commands), model, effort and mode switching, session list / load / resume with history replay,
+  usage.
 
 ## Requirements
 
@@ -149,8 +150,16 @@ ACP client ──stdio, JSON-RPC (ACP v1 or v2)──▶ lacp ──WebSocket─
   to the App Server as a runtime with the session's working directory.
 - Tool calls run inside Letta Code, with its permission rules. When Letta needs approval, `lacp` asks the editor
   (`session/request_permission`) and forwards the answer, including "always allow" suggestions.
-- Modes are Letta Code's permission modes, models come from Letta's model catalog, and slash commands are the
-  App Server's commands plus those contributed by your mods.
+- Sessions offer three settings, in this order: **Model**, **Effort** and **Mode**.
+  - Models are Letta Code's, one per model and context window (a `…-1M` variant is its own entry), named with
+    their provider, since the same model can come from several.
+  - Effort lists the levels the selected model supports (from `letta model list`, which covers your own
+    providers, a ChatGPT subscription and the local backend, not just Letta's hosted models). It is applied
+    through Letta's effort preset where the model has one, and with `letta model set --reasoning` otherwise.
+    Switching models keeps the effort when the new model supports it. Clients show it as a `thought_level`
+    setting (T3 Code: the traits menu; Zed: a dropdown next to the model).
+  - Modes are Letta Code's permission modes.
+- Slash commands are the App Server's commands plus those contributed by your mods.
 - MCP servers the editor offers in `session/new` (for example T3 Code's per-session server) are connected by
   `lacp`, over stdio or Streamable HTTP, and their tools are registered with the Letta runtime as external tools
   named `mcp__<server>__<tool>`. Letta Code runs them like its own tools (with its approval rules), and `lacp`

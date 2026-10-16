@@ -42,6 +42,7 @@ import type {
 import { Host } from "../Host.ts"
 import { type Frame, LettaAppServer, type LettaConnection } from "../letta/AppServer.ts"
 import { isAuthFailure, type LettaError } from "../letta/Errors.ts"
+import * as Models from "../letta/Models.ts"
 import {
   AgentRetrieveResponse,
   ControlRequest,
@@ -57,7 +58,7 @@ import {
   InputAccepted,
   ListModelsResponse,
   LoopStatus,
-  type ModelEntry,
+  type ModelSettings,
   type PermissionMode,
   PermissionMode as PermissionModeSchema,
   QueueUpdate,
@@ -104,6 +105,10 @@ export type AgentError = SessionNotFound | AgentUnavailable | InvalidConfigValue
 
 const unavailable = (error: LettaError) => new AgentUnavailable({ message: error.message, auth: isAuthFailure(error) })
 
+/** Letta rejecting a config change means the value is invalid; any other failure means Letta is unavailable. */
+const configFailure = (configId: string, value: string) => (error: LettaError) =>
+  error._tag === "LettaRequestFailed" ? new InvalidConfigValue({ configId, value }) : unavailable(error)
+
 // ---------------------------------------------------------------------------
 // Public model
 // ---------------------------------------------------------------------------
@@ -139,6 +144,7 @@ export interface SessionSummary {
 
 export const MODE_CONFIG_ID = "mode"
 export const MODEL_CONFIG_ID = "model"
+export const EFFORT_CONFIG_ID = "effort"
 
 const MODES: ReadonlyArray<{ readonly value: PermissionMode; readonly name: string; readonly description: string }> = [
   { value: "standard", name: "Standard", description: "Ask before running tools that change files or run commands" },
@@ -233,10 +239,13 @@ interface Session {
   readonly permissions: FiberSet.FiberSet<void, never>
   attachment: Option.Option<Attachment>
   mode: Option.Option<PermissionMode>
+  /** The model handle. */
   model: Option.Option<string>
+  /** The reasoning effort recorded in the conversation's model settings. */
+  effort: Option.Option<Models.Effort>
   contextWindow: Option.Option<number>
   commands: ReadonlyArray<Command>
-  models: ReadonlyArray<ModelEntry>
+  models: ReadonlyArray<Models.ModelChoice>
   readonly ownMessages: Set<string>
   turn: Option.Option<Turn>
   foreground: "idle" | "running" | "requires_action"
@@ -300,7 +309,7 @@ export class Agent extends Context.Service<Agent, {
       const layerScope = yield* Effect.scope
       const sessions = new Map<string, Session>()
       const agentsByCwd = new Map<string, string>()
-      const modelsByGeneration = new Map<number, ReadonlyArray<ModelEntry>>()
+      const modelsByGeneration = new Map<number, ReadonlyArray<Models.ModelChoice>>()
 
       // A failing CSPRNG is not a recoverable condition.
       const uuid = crypto.randomUUIDv4().pipe(Effect.orDie)
@@ -326,22 +335,19 @@ export class Agent extends Context.Service<Agent, {
 
       // --- config options --------------------------------------------------
 
+      const currentChoice = (session: Session) =>
+        Option.flatMap(session.model, (handle) => Models.findChoice(session.models, handle, session.contextWindow))
+
+      /** Model, effort (when the model has levels to choose from) and mode, in that order. */
       const configOptions = (session: Session): ReadonlyArray<ConfigOption> => {
-        const options: Array<ConfigOption> = [{
-          id: MODE_CONFIG_ID,
-          name: "Mode",
-          description: "When Letta Code asks before running tools",
-          category: "mode",
-          currentValue: Option.getOrElse(session.mode, () => "standard"),
-          options: MODES.map((m) => ({ value: m.value, name: m.name, description: m.description }))
-        }]
+        const options: Array<ConfigOption> = []
+        const choice = currentChoice(session)
         if (Option.isSome(session.model) || session.models.length > 0) {
-          const current = Option.getOrElse(session.model, () => session.models[0]?.handle ?? "")
-          const choices = session.models.map((m) => ({
-            value: m.handle,
-            name: m.label,
-            ...(m.description === undefined || m.description === null ? {} : { description: m.description })
-          }))
+          const current = Option.match(choice, {
+            onSome: (c) => c.key,
+            onNone: () => Option.getOrElse(session.model, () => session.models[0]?.key ?? "")
+          })
+          const choices = Models.modelChoices(session.models)
           if (!choices.some((c) => c.value === current)) choices.unshift({ value: current, name: current })
           options.push({
             id: MODEL_CONFIG_ID,
@@ -351,21 +357,55 @@ export class Agent extends Context.Service<Agent, {
             options: choices
           })
         }
+        if (Option.isSome(choice) && choice.value.levels.length > 1) {
+          options.push({
+            id: EFFORT_CONFIG_ID,
+            name: "Effort",
+            description: "How much the model reasons before it answers",
+            category: "thought_level",
+            currentValue: Models.shownEffort(choice.value, session.effort) ?? "",
+            options: Models.effortChoices(choice.value)
+          })
+        }
+        options.push({
+          id: MODE_CONFIG_ID,
+          name: "Mode",
+          description: "When Letta Code asks before running tools",
+          category: "mode",
+          currentValue: Option.getOrElse(session.mode, () => "standard"),
+          options: MODES.map((m) => ({ value: m.value, name: m.name, description: m.description }))
+        })
         return options
       }
 
+      /**
+       * The model choices for a connection: `list_models`, with each model's
+       * effort levels from `letta model list` (which also covers models that
+       * have no presets). Cached per App Server generation.
+       */
       const models = (connection: LettaConnection) =>
         Effect.suspend(() => {
           const cached = modelsByGeneration.get(connection.generation)
           if (cached !== undefined) return Effect.succeed(cached)
-          return connection.call((request_id) => ({ type: "list_models", request_id }), ListModelsResponse, {
+          const entries = connection.call((request_id) => ({ type: "list_models", request_id }), ListModelsResponse, {
             timeout: "15 seconds"
           }).pipe(
             Effect.map((response) => response.entries),
-            Effect.tap((entries) => Effect.sync(() => modelsByGeneration.set(connection.generation, entries))),
             Effect.catch((error) =>
               Effect.logWarning(`Could not list Letta models: ${error.message}`).pipe(Effect.as([]))
             )
+          )
+          const levels = appServer.cli(["model", "list"]).pipe(
+            Effect.map((output) => Option.getOrElse(Models.decodeModelList(output), () => [])),
+            Effect.catch((error) =>
+              Effect.logDebug(`Effort levels from \`letta model list\` are unavailable: ${error.message}`).pipe(
+                Effect.as([])
+              )
+            )
+          )
+          return Effect.all([entries, levels], { concurrency: "unbounded" }).pipe(
+            Effect.map(([e, rows]) => Models.catalog(e, rows)),
+            Effect.tap((choices) => Effect.sync(() => modelsByGeneration.set(connection.generation, choices)))
           )
         })
 
@@ -780,8 +820,12 @@ export class Agent extends Context.Service<Agent, {
           attachment: Option.none(),
           mode: config.permissionMode,
           model: Option.fromNullishOr(started.response.conversation?.model ?? started.response.agent?.model),
+          effort: Models.settingsEffort(
+            started.response.conversation?.model_settings ?? started.response.agent?.model_settings
+          ),
           contextWindow: Option.fromNullishOr(
-            started.response.agent?.llm_config?.context_window ??
+            started.response.conversation?.model_settings?.context_window_limit ??
+              started.response.agent?.llm_config?.context_window ??
               started.response.agent?.model_settings?.context_window_limit
           ),
           commands: [],
@@ -913,20 +957,107 @@ export class Agent extends Context.Service<Agent, {
         return Option.some(created.agent_id)
       })
 
-      const applyConfiguredModel = Effect.fnUntraced(function*(session: Session, attachment: Attachment) {
-        if (Option.isNone(config.model) || Option.contains(session.model, config.model.value)) return
-        const response = yield* attachment.connection.call(
-          (request_id) => ({
-            type: "update_model",
-            request_id,
-            runtime: attachment.runtime,
-            payload: { model_handle: config.model.pipe(Option.getOrElse(() => "")) }
-          }),
-          UpdateModelResponse
-        ).pipe(Effect.option)
-        if (Option.isSome(response)) {
-          session.model = Option.some(response.value.model_handle ?? Option.getOrElse(config.model, () => ""))
+      /** Records what Letta applied, as reported in model settings. */
+      const recordSettings = (
+        session: Session,
+        handle: Option.Option<string>,
+        settings: ModelSettings | null | undefined
+      ) => {
+        if (Option.isSome(handle)) session.model = handle
+        const contextWindow = Option.fromNullishOr(settings?.context_window_limit)
+        if (Option.isSome(contextWindow)) session.contextWindow = contextWindow
+        session.effort = Models.settingsEffort(settings)
+      }
+
+      const updateModel = (
+        attachment: Attachment,
+        payload: { readonly model_id?: string; readonly model_handle?: string; readonly reasoning_effort?: string }
+      ) =>
+        attachment.connection.call(
+          (request_id) => ({ type: "update_model", request_id, runtime: attachment.runtime, payload }),
+          UpdateModelResponse,
+          { timeout: "60 seconds" }
+        )
+
+      /**
+       * Sets the effort of the session's model: through its preset when it has
+       * one, otherwise as a model setting (`letta model set --reasoning`, or
+       * `update_model` when lacp did not start the App Server).
+       */
+      const applyEffort = Effect.fnUntraced(function*(
+        session: Session,
+        attachment: Attachment,
+        choice: Models.ModelChoice,
+        effort: Models.Effort
+      ) {
+        const preset = Models.presetFor(choice, effort)
+        if (Option.isSome(preset)) {
+          const response = yield* updateModel(attachment, { model_id: preset.value, model_handle: choice.handle })
+          recordSettings(session, Option.some(response.model_handle ?? choice.handle), response.model_settings)
+          return
         }
+        const viaCli = yield* appServer.cli(["model", "set", "--conversation", session.id, "--reasoning", effort]).pipe(
+          Effect.as(true),
+          Effect.catch((error) =>
+            Effect.logDebug(`\`letta model set\` failed, trying update_model: ${error.message}`).pipe(Effect.as(false))
+          )
+        )
+        if (!viaCli) {
+          const response = yield* updateModel(attachment, { model_handle: choice.handle, reasoning_effort: effort })
+          recordSettings(session, Option.some(response.model_handle ?? choice.handle), response.model_settings)
+          return
+        }
+        const retrieved = yield* attachment.connection.call(
+          (request_id) => ({ type: "conversation_retrieve", request_id, conversation_id: session.id }),
+          ConversationRetrieveResponse
+        )
+        recordSettings(session, Option.none(), retrieved.conversation?.model_settings)
+      })
+
+      /**
+       * Switches the session to `choice`, keeping the current effort when the
+       * new model supports it.
+       */
+      const applyModel = Effect.fnUntraced(function*(
+        session: Session,
+        attachment: Attachment,
+        choice: Models.ModelChoice
+      ) {
+        const wanted = session.effort
+        const response = yield* updateModel(attachment, {
+          model_id: Models.selectionId(choice, wanted),
+          model_handle: choice.handle
+        })
+        recordSettings(session, Option.some(response.model_handle ?? choice.handle), response.model_settings)
+        if (response.model_settings?.context_window_limit == null) session.contextWindow = choice.contextWindow
+        if (
+          Option.isSome(wanted) && choice.levels.includes(wanted.value) &&
+          !Option.contains(session.effort, wanted.value)
+        ) {
+          yield* applyEffort(session, attachment, choice, wanted.value).pipe(
+            Effect.catch((error) => Effect.logWarning(`Could not keep the ${wanted.value} effort: ${error.message}`))
+          )
+        }
+      })
+
+      const applyConfiguredModel = Effect.fnUntraced(function*(session: Session, attachment: Attachment) {
+        if (Option.isNone(config.model)) return
+        const wanted = config.model.value
+        const choice = Option.orElse(
+          Option.fromUndefinedOr(session.models.find((c) => c.key === wanted)),
+          () => Models.findChoice(session.models, wanted, Option.none())
+        )
+        if (Option.isSome(choice) && Option.contains(session.model, choice.value.handle)) return
+        if (Option.isNone(choice) && Option.contains(session.model, wanted)) return
+        yield* Option.match(choice, {
+          onSome: (c) => applyModel(session, attachment, c),
+          onNone: () =>
+            updateModel(attachment, { model_handle: wanted }).pipe(
+              Effect.map((response) =>
+                recordSettings(session, Option.some(response.model_handle ?? wanted), response.model_settings)
+              )
+            )
+        }).pipe(Effect.catch((error) => Effect.logWarning(`Could not apply LACP_MODEL=${wanted}: ${error.message}`)))
       })
 
       // --- history ----------------------------------------------------------
@@ -1246,21 +1377,28 @@ export class Agent extends Context.Service<Agent, {
             )
             session.mode = mode
           } else if (configId === MODEL_CONFIG_ID) {
-            const response = yield* attachment.connection.call(
-              (request_id) => ({
-                type: "update_model",
-                request_id,
-                runtime: attachment.runtime,
-                payload: { model_handle: value }
-              }),
-              UpdateModelResponse,
-              { timeout: "60 seconds" }
-            ).pipe(
-              Effect.mapError((error) =>
-                error._tag === "LettaRequestFailed" ? new InvalidConfigValue({ configId, value }) : unavailable(error)
-              )
+            const choice = Option.orElse(
+              Option.fromUndefinedOr(session.models.find((c) => c.key === value)),
+              () => Models.findChoice(session.models, value, Option.none())
             )
-            session.model = Option.some(response.model_handle ?? value)
+            if (Option.isNone(choice)) return yield* new InvalidConfigValue({ configId, value })
+            yield* applyModel(session, attachment, choice.value).pipe(Effect.mapError(configFailure(configId, value)))
+          } else if (configId === EFFORT_CONFIG_ID) {
+            const choice = currentChoice(session)
+            const effort = Models.decodeEffort(value)
+            if (Option.isNone(choice) || Option.isNone(effort) || !choice.value.levels.includes(effort.value)) {
+              return yield* new InvalidConfigValue({ configId, value })
+            }
+            yield* applyEffort(session, attachment, choice.value, effort.value).pipe(
+              Effect.mapError(configFailure(configId, value))
+            )
+            if (!Option.contains(session.effort, effort.value)) {
+              yield* Effect.logWarning(
+                `Asked Letta for ${effort.value} effort on ${choice.value.handle}; it reports ${
+                  Option.getOrElse(session.effort, () => "none recorded")
+                }`
+              )
+            }
           } else {
             return yield* new InvalidConfigValue({ configId, value })
           }

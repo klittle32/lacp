@@ -138,7 +138,11 @@ export const Command = Schema.Union([
     type: Schema.Literal("update_model"),
     request_id: Schema.String,
     runtime: RuntimeScope,
-    payload: Schema.Struct({ model_handle: opt(Schema.String), model_id: opt(Schema.String) })
+    payload: Schema.Struct({
+      model_handle: opt(Schema.String),
+      model_id: opt(Schema.String),
+      reasoning_effort: opt(Schema.String)
+    })
   }),
   Schema.Struct({
     type: Schema.Literal("conversation_list"),
@@ -203,6 +207,20 @@ export const AppServerInfo = response({
 })
 export type AppServerInfo = typeof AppServerInfo.Type
 
+/**
+ * The model settings of an agent or conversation. Effort lives in a
+ * provider-specific place: `reasoning_effort` (also under `reasoning`) for
+ * OpenAI-style providers, `effort` for Anthropic.
+ */
+export const ModelSettings = Schema.Struct({
+  provider_type: optNull(Schema.String),
+  context_window_limit: optNull(Schema.Int),
+  reasoning_effort: optNull(Schema.String),
+  reasoning: optNull(Schema.Struct({ reasoning_effort: optNull(Schema.String) })),
+  effort: optNull(Schema.String)
+})
+export type ModelSettings = typeof ModelSettings.Type
+
 export const AgentState = Schema.Struct({
   id: Schema.String,
   name: optNull(Schema.String),
@@ -211,7 +229,7 @@ export const AgentState = Schema.Struct({
     model: optNull(Schema.String),
     context_window: optNull(Schema.Int)
   })),
-  model_settings: optNull(Schema.Struct({ context_window_limit: optNull(Schema.Int) }))
+  model_settings: optNull(ModelSettings)
 })
 export type AgentState = typeof AgentState.Type
 
@@ -221,6 +239,7 @@ export const Conversation = Schema.Struct({
   summary: optNull(Schema.String),
   description: optNull(Schema.String),
   model: optNull(Schema.String),
+  model_settings: optNull(ModelSettings),
   created_at: optNull(Schema.String),
   updated_at: optNull(Schema.String),
   last_message_at: optNull(Schema.String),
@@ -247,7 +266,9 @@ export const ModelEntry = Schema.Struct({
   label: Schema.String,
   description: optNull(Schema.String),
   isDefault: optNull(Schema.Boolean),
-  isFeatured: optNull(Schema.Boolean)
+  isFeatured: optNull(Schema.Boolean),
+  /** What selecting the entry applies, e.g. `reasoning_effort` and `context_window` for catalog presets. */
+  updateArgs: optNull(Schema.Record(Schema.String, Schema.Unknown))
 })
 export type ModelEntry = typeof ModelEntry.Type
 
@@ -256,7 +277,8 @@ export const ListModelsResponse = response({ entries: Schema.Array(ModelEntry) }
 export const UpdateModelResponse = response({
   model_id: optNull(Schema.String),
   model_handle: optNull(Schema.String),
-  applied_to: optNull(Schema.String)
+  applied_to: optNull(Schema.String),
+  model_settings: optNull(ModelSettings)
 })
 
 export const ConversationListResponse = response({ conversations: Schema.Array(Conversation) })
