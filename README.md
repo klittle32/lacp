@@ -88,8 +88,9 @@ Code's `letta.js` with the runtime that can see your login:
 `lacp doctor` shows the runtime it picked, why, and where your login is. `lacp` itself runs on Node either way; this
 setting only decides what runs Letta Code. It applies when `letta` is an npm or Bun install (a link to `letta.js`).
 For other launchers (Volta or pnpm shims, `letta.cmd` on Windows), set `LACP_LETTA_PATH` to the `letta.js` file to
-choose the runtime. Under Bun, `lacp` passes `--no-env-file`, so Letta Code does not load a `.env` file from the
-directory it starts in: its environment is exactly what `lacp` passes, as under Node.
+choose the runtime. Under Bun, Letta Code loads the `.env` files of the folder your editor starts `lacp` in (the
+project), as it does in your terminal; under Node it does not. With `LACP_AUTH=cloud-oauth`, `lacp` passes an empty
+`LETTA_API_KEY`, which no `.env` file can override, so your login is used either way.
 
 ### Zed
 

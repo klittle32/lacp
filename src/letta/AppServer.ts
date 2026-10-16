@@ -130,7 +130,10 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
         if (config.auth === "api-key" && Option.isSome(config.apiKey)) {
           env["LETTA_API_KEY"] = Redacted.value(config.apiKey.value)
         }
-        if (config.auth === "cloud-oauth") delete env["LETTA_API_KEY"]
+        // Empty rather than removed: under Bun, Letta Code loads the project's `.env`
+        // files, which never override a variable that is already set. Letta Code
+        // treats an empty key as no key, so the stored login is used.
+        if (config.auth === "cloud-oauth") env["LETTA_API_KEY"] = ""
         return env
       }
 

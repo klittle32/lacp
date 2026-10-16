@@ -145,7 +145,7 @@ const scriptInstall = Effect.gen(function*() {
   yield* fs.makeDirectory(bin)
   yield* fs.symlink(script, path.join(bin, "letta"))
   const bun = path.join(bin, "bun")
-  yield* fs.writeFileString(bun, `#!/bin/sh\n[ "$1" = "--no-env-file" ] && shift\nexec "${process.execPath}" "$@"\n`)
+  yield* fs.writeFileString(bun, `#!/bin/sh\nexec "${process.execPath}" "$@"\n`)
   yield* fs.chmod(bun, 0o755)
   const home = path.join(dir, "home")
   yield* fs.makeDirectory(path.join(home, ".letta"), { recursive: true })
@@ -161,7 +161,7 @@ describe("LettaExecutable runtimes", () => {
       const install = yield* resolveWith({ PATH: bin, HOME: home }, {}, host(home))
       assert.strictEqual(install.runtime, "bun")
       assert.strictEqual(install.command, bun)
-      assert.deepStrictEqual(install.prefixArgs, ["--no-env-file", script])
+      assert.deepStrictEqual(install.prefixArgs, [script])
       assert.strictEqual(install.version, "0.34.15")
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
 
