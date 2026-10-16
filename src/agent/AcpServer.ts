@@ -250,7 +250,7 @@ export class AcpServer extends Context.Service<AcpServer, {
 
           if (Option.isSome(v2Request)) {
             const capabilities = v2Request.value.capabilities ?? {}
-            yield* client.select({ version: 2, capabilities })
+            yield* client.select({ version: 2, capabilities, client: v2Request.value.info })
             yield* Ref.set(surface, Option.some(v2))
             yield* Effect.logInfo(`ACP v2 negotiated with ${v2Request.value.info.name} ${v2Request.value.info.version}`)
             yield* agent.warmup

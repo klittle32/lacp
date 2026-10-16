@@ -4,6 +4,7 @@
 // - "SPAWN_WORKER" makes the agent start a background subagent with the Agent tool.
 // - The subagent ("WORKER_TASK") answers after SCRIPTED_MODEL_WORKER_MS (default 1500).
 // - The follow-up turn Letta runs with the subagent's <task-notification> reports.
+// - "FAIL_ONCE" fails the first request for it with HTTP 503 (Letta retries), then answers.
 // - Anything else (titles, reflection) gets "ok".
 import http from "node:http"
 
@@ -21,10 +22,17 @@ const chunk = (delta, finish = null) =>
     JSON.stringify({ id: "c", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason: finish }] })
   }\n\n`
 
+let failedOnce = false
+
 const reply = async (body) => {
   const messages = body.messages ?? []
   const last = messages.at(-1)
   const user = textOf([...messages].reverse().find((m) => m.role === "user"))
+  if (user.includes("FAIL_ONCE")) {
+    if (failedOnce) return [{ content: "Recovered after a retry." }]
+    failedOnce = true
+    return { status: 503, error: "The scripted model is overloaded" }
+  }
   if (last?.role === "tool") return [{ content: "Started a worker; it will report back." }]
   if (user.includes("<task-notification>")) {
     return [{ reasoning_content: "The worker finished." }, { content: "Here is the listing: a.txt b.txt" }]
@@ -64,6 +72,10 @@ const server = http.createServer(async (req, res) => {
     return res.end()
   }
   const deltas = await reply(JSON.parse(raw))
+  if (!Array.isArray(deltas)) {
+    res.writeHead(deltas.status, { "content-type": "application/json" })
+    return res.end(JSON.stringify({ error: { message: deltas.error, type: "server_error" } }))
+  }
   res.writeHead(200, { "content-type": "text/event-stream" })
   for (const delta of deltas) res.write(chunk({ role: "assistant", ...delta }))
   res.write(chunk({}, deltas.some((d) => d.tool_calls) ? "tool_calls" : "stop"))

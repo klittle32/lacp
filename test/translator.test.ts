@@ -219,6 +219,36 @@ describe("Translator", () => {
       assert.deepStrictEqual(t.history({ message_type: "user_message", id: "u3", content: subagent }), [])
     }))
 
+  it.effect("reports retries from either backend as warnings", () =>
+    Effect.gen(function*() {
+      const t = yield* make
+      const notice = {
+        _tag: "Notice",
+        severity: "warning",
+        title: "Retrying (attempt 1/3)",
+        description: "503: overloaded"
+      } as const
+      assert.deepStrictEqual(
+        t.delta({ message_type: "retry", id: "r1", message: "503: overloaded", attempt: 1, max_attempts: 3 }),
+        [{ _tag: "Event", event: notice }]
+      )
+      // As Letta Code 0.34.15's local backend reports it.
+      assert.deepStrictEqual(
+        t.delta({
+          message_type: "event_message",
+          id: "letta-msg-1",
+          event_type: "retry",
+          event_data: { attempt: 1, max_attempts: 3, delay_ms: 1000, message: "503: overloaded" },
+          run_id: "local-run-1"
+        }),
+        [{ _tag: "Event", event: notice }]
+      )
+      assert.deepStrictEqual(
+        t.delta({ message_type: "event_message", id: "e2", event_type: "compaction", event_data: {} }),
+        []
+      )
+    }))
+
   it.effect("closes open tool calls when a turn ends", () =>
     Effect.gen(function*() {
       const t = yield* make

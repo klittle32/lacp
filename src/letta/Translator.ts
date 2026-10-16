@@ -30,6 +30,7 @@ import {
   type ControlRequest,
   DeltaHeader,
   ErrorDelta,
+  EventMessageDelta,
   LoopErrorDelta,
   ReasoningDelta,
   RetryDelta,
@@ -111,6 +112,7 @@ const decodeClientToolStart = decode(ClientToolStart)
 const decodeClientToolEnd = decode(ClientToolEnd)
 const decodeCommandEnd = decode(CommandEnd)
 const decodeRetry = decode(RetryDelta)
+const decodeEventMessage = decode(EventMessageDelta)
 const decodeLoopError = decode(LoopErrorDelta)
 const decodeError = decode(ErrorDelta)
 const decodeUsage = decode(UsageDelta)
@@ -144,6 +146,20 @@ const stripInjected = (text: string) =>
 const reportedSubagents = (text: string): ReadonlyArray<string> =>
   Array.from(text.matchAll(/<task-notification>[\s\S]*?(?:<\/task-notification>|$)/g))
     .flatMap((report) => Option.toArray(Option.fromNullishOr(/\bsubagent_id=([^\s<]+)/.exec(report[0])?.[1])))
+
+/** A retry of the model request, from the cloud backend's `retry` delta or the local backend's `retry` event. */
+const retryNotice = (retry: {
+  readonly message?: string | undefined
+  readonly attempt?: number | undefined
+  readonly max_attempts?: number | undefined
+}): SessionEvent => ({
+  _tag: "Notice",
+  severity: "warning",
+  title: retry.attempt === undefined
+    ? "Retrying"
+    : `Retrying (attempt ${retry.attempt}${retry.max_attempts === undefined ? "" : `/${retry.max_attempts}`})`,
+  ...(retry.message === undefined ? {} : { description: retry.message })
+})
 
 const clip = (text: string) => (text.length > MAX_OUTPUT ? `${text.slice(0, MAX_OUTPUT)}\n… (truncated)` : text)
 
@@ -438,16 +454,11 @@ export const make = (context: TranslatorContext): Translator => {
               ]
         })
       case "retry":
-        return Option.match(decodeRetry(delta), {
+        return Option.match(decodeRetry(delta), { onNone: () => [], onSome: (d) => [event(retryNotice(d))] })
+      case "event_message":
+        return Option.match(decodeEventMessage(delta), {
           onNone: () => [],
-          onSome: (d) => [event({
-            _tag: "Notice",
-            severity: "warning",
-            title: d.attempt === undefined
-              ? "Retrying"
-              : `Retrying (attempt ${d.attempt}${d.max_attempts === undefined ? "" : `/${d.max_attempts}`})`,
-            description: d.message
-          })]
+          onSome: (d) => d.event_type === "retry" ? [event(retryNotice(d.event_data ?? {}))] : []
         })
       case "loop_error":
         return Option.match(decodeLoopError(delta), {

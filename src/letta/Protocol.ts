@@ -530,6 +530,17 @@ export const RetryDelta = Schema.Struct({
   max_attempts: opt(Schema.Int)
 })
 
+/** Lifecycle events of the local backend; a `retry` carries what a `retry` delta does. */
+export const EventMessageDelta = Schema.Struct({
+  message_type: Schema.Literal("event_message"),
+  event_type: Schema.String,
+  event_data: optNull(Schema.Struct({
+    message: opt(Schema.String),
+    attempt: opt(Schema.Int),
+    max_attempts: opt(Schema.Int)
+  }))
+})
+
 export const LoopErrorDelta = Schema.Struct({
   message_type: Schema.Literal("loop_error"),
   message: Schema.String,

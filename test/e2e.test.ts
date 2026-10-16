@@ -141,7 +141,10 @@ describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
       const reply = yield* client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] })
       yield* client.update((u) => u.sessionUpdate === "user_message" && u.messageId === reply.result.messageId)
       yield* client.update((u) => u.sessionUpdate === "agent_message_chunk" && u.content.text === "pong")
-      assert.isFalse((yield* client.updates).some((u) => u.sessionUpdate === "notice"))
+      // T3 Code gets notices as tool calls: none may report the server as unavailable.
+      assert.isFalse(
+        (yield* client.updates).some((u) => u.sessionUpdate === "notice" || /unavailable/.test(u.title ?? ""))
+      )
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), 180_000)
 
   it.live.skipIf(!hasBun)("runs Letta Code under Bun with LACP_LETTA_RUNTIME=bun", () =>

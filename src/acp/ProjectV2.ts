@@ -141,10 +141,41 @@ export interface ProjectorV2 {
   readonly project: (event: SessionEvent) => Updates
 }
 
-/** Projects events for one connection; without `echoPrompts`, prompts are not sent back as `user_message`. */
-export const makeProjector = (features: { readonly echoPrompts: boolean }): ProjectorV2 => ({
-  project: (event) => event._tag === "UserMessage" && !features.echoPrompts ? [] : project(event)
-})
+export interface ProjectorFeatures {
+  /** Send prompts back as `user_message`. */
+  readonly echoPrompts: boolean
+  /** The client presents `notice` updates; otherwise each notice becomes a finished tool call. */
+  readonly notices: boolean
+  /** Keeps the ids of those tool calls unique beyond this connection: clients keep tool calls per thread. */
+  readonly noticeIdPrefix: string
+}
+
+/** A notice as a finished tool call, which every client shows. */
+const noticeToolCall = (toolCallId: string, notice: Extract<SessionEvent, { readonly _tag: "Notice" }>): Updates => [{
+  sessionUpdate: "tool_call_update",
+  toolCallId,
+  title: notice.title,
+  kind: "other",
+  status: notice.severity === "error" ? "failed" : "completed",
+  ...(notice.description === undefined
+    ? {}
+    : { content: [{ type: "content", content: { type: "text", text: notice.description } }] })
+}]
+
+/** Projects events for one connection. */
+export const makeProjector = (features: ProjectorFeatures): ProjectorV2 => {
+  let notices = 0
+  return {
+    project: (event) => {
+      if (event._tag === "UserMessage" && !features.echoPrompts) return []
+      if (event._tag === "Notice" && !features.notices) {
+        notices += 1
+        return noticeToolCall(`${features.noticeIdPrefix}-${notices}`, event)
+      }
+      return project(event)
+    }
+  }
+}
 
 /** `session/request_permission` params for v2. */
 export const permissionParams = (sessionId: string, request: PermissionRequest) => ({

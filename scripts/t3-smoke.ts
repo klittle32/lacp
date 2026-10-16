@@ -6,6 +6,8 @@
  * 1. A prompt that starts a background subagent: its report must appear and
  *    the turn must end on its own.
  * 2. The same prompt, stopped while the subagent runs: the turn must end at once.
+ * 3. A model request that fails once: Letta's retry must show as a readable row,
+ *    not as T3's "Unsupported ACP update".
  *
  * Letta Code runs on its local backend against the scripted model in
  * test/fixtures/scripted-model.mjs, so no Letta account or model provider is
@@ -53,7 +55,8 @@ const fail = (step: string) => (cause: unknown) => new SmokeFailed({ step, messa
 
 /** The provider's display name in T3. */
 const PROVIDER = "lacp smoke"
-const PROMPT = "SPAWN_WORKER and list the directory"
+const SPAWN_WORKER = "SPAWN_WORKER and list the directory"
+const FAIL_ONCE = "FAIL_ONCE and say hello"
 /** How long the scripted subagent works: long enough to stop it, like a real worker. */
 const WORKER_MS = 8000
 
@@ -279,10 +282,13 @@ const finishSetup = (page: Page) =>
       : Effect.succeed(false)
   ).pipe(Effect.repeat({ while: (pending) => pending, times: 10 }))
 
-/** Opens a new thread on the lacp provider with the scripted model and sends the prompt. */
-const startThread = (page: Page, base: string) =>
-  ui("start a thread on lacp with the scripted model", async () => {
-    await page.goto(base)
+/** Opens T3; a navigation of T3's own (after its setup, say) can interrupt the first try. */
+const openT3 = (page: Page, base: string) =>
+  ui("open T3 Code", () => page.goto(base)).pipe(Effect.retry({ times: 3, schedule: Schedule.spaced("1 second") }))
+
+/** Opens a new thread on the lacp provider with the scripted model and sends `prompt`. */
+const startThread = (page: Page, base: string, prompt: string) =>
+  openT3(page, base).pipe(Effect.andThen(ui("start a thread on lacp with the scripted model", async () => {
     const newThread = page.locator("[aria-label=\"New thread\"]")
     if ((await newThread.count()) > 0) await newThread.first().click()
     await page.locator("[data-chat-provider-model-picker]").first().click()
@@ -292,16 +298,16 @@ const startThread = (page: Page, base: string) =>
     await page.locator("[role=option]").filter({ hasText: "mock-model" }).filter({ hasText: PROVIDER }).first()
       .click({ timeout: 120_000 })
     await page.locator("[data-testid=\"composer-editor\"]").first().click()
-    await page.keyboard.type(PROMPT)
+    await page.keyboard.type(prompt)
     await page.keyboard.press("Enter")
-  })
+  })))
 
 const seconds = (since: number) => Clock.currentTimeMillis.pipe(Effect.map((now) => (now - since) / 1000))
 
 /** The subagent's report appears, and the turn ends on its own. */
 const reportCheck = Effect.fnUntraced(function*(page: Page, base: string, out: string) {
   const path = yield* Path.Path
-  yield* startThread(page, base)
+  yield* startThread(page, base, SPAWN_WORKER)
   const sent = yield* Clock.currentTimeMillis
   const text = yield* waitForThread(
     page,
@@ -320,7 +326,7 @@ const reportCheck = Effect.fnUntraced(function*(page: Page, base: string, out: s
 /** Stopping a turn that waits for its subagent ends it at once. */
 const stopCheck = Effect.fnUntraced(function*(page: Page, base: string, out: string) {
   const path = yield* Path.Path
-  yield* startThread(page, base)
+  yield* startThread(page, base, SPAWN_WORKER)
   // The subagent's tool call shows once it has started; the turn then waits for its report.
   yield* waitForThread(page, "the subagent starts", (text) => /List directory|Tool/.test(text), "3 minutes")
   yield* Effect.sleep("2 seconds")
@@ -330,6 +336,30 @@ const stopCheck = Effect.fnUntraced(function*(page: Page, base: string, out: str
   const took = yield* seconds(stopped)
   yield* screenshot(page, path.join(out, "2-stop.png"))
   return `Stop ended the waiting turn after ${took.toFixed(1)} s`
+})
+
+/** A retried model request shows as a row with its own text in the turn's work log. */
+const retryCheck = Effect.fnUntraced(function*(page: Page, base: string, out: string) {
+  const path = yield* Path.Path
+  yield* startThread(page, base, FAIL_ONCE)
+  yield* waitForThread(
+    page,
+    "the retried request answers",
+    (text) => /Worked for/.test(text) && text.includes("Recovered after a retry"),
+    "3 minutes"
+  )
+  yield* ui("open the work log", () => page.getByText(/^Worked for/).first().click())
+  const text = yield* waitForThread(
+    page,
+    "the retry shows in the work log",
+    (text) => /Retrying/.test(text),
+    "5 seconds"
+  )
+  yield* screenshot(page, path.join(out, "3-retry.png"))
+  if (text.includes("Unsupported ACP update")) {
+    return yield* new SmokeFailed({ step: "the retry shows", message: "T3 shows an \"Unsupported ACP update\" row" })
+  }
+  return `the retry showed as "${/Retrying[^\n]*/.exec(text)?.[0].trim()}"`
 })
 
 // --- main ------------------------------------------------------------------------
@@ -389,7 +419,7 @@ const smoke = Effect.gen(function*() {
   const results = yield* Effect.gen(function*() {
     yield* pair(page, pairingUrl)
     yield* finishSetup(page)
-    return [yield* reportCheck(page, base, out), yield* stopCheck(page, base, out)]
+    return [yield* reportCheck(page, base, out), yield* stopCheck(page, base, out), yield* retryCheck(page, base, out)]
   }).pipe(Effect.tapError(() => screenshot(page, path.join(out, "failure.png")).pipe(Effect.ignore)))
   for (const result of results) yield* Console.log(`✓ ${result}`)
   yield* Console.log(`Screenshots, lacp.log, t3.log and model.log are in ${out}`)

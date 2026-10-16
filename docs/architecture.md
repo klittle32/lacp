@@ -66,7 +66,11 @@ src/
      cancelled is never held, and cancelling a held turn ends it at once. This is for clients that do not show
      turns the agent starts on its own, such as T3 Code.
 4. `AcpClient` projects each event onto the negotiated version (`ProjectV1` / `ProjectV2`) and sends
-   `session/update` notifications in order, always before the v1 prompt response.
+   `session/update` notifications in order, always before the v1 prompt response. Notices (retries, Letta errors,
+   unavailable MCP servers) go out as `notice` where the client presents them: v1 clients that advertise
+   `session.notices`, and v2 clients other than T3 Code. T3 Code's ACP draft predates notices and shows one as an
+   empty "Unsupported ACP update" row, so it gets each as a finished tool call (failed for errors) with the
+   notice's text.
 
 Cancellation sends `abort_message` and ends the turn as soon as Letta acknowledges the abort: Letta reports the end
 of an aborted turn only once the model request settles, which takes as long as the model stays silent. If Letta
@@ -115,7 +119,7 @@ tools_.
 2. While the Letta connection is prepared, `Bridge.connectAll` connects every server concurrently, each in its own
    scope forked from the session's (so closing the session stops the servers). The MCP client reuses the JSON-RPC
    peer over an MCP transport and answers `ping` and `roots/list` (the session's working directory). A server that
-   fails or takes longer than 30 seconds is reported as a warning `notice` and left out.
+   fails or takes longer than 30 seconds is reported as a warning notice and left out.
 3. `runtime_start` carries the tools as `external_tools`, named `mcp__<server>__<tool>` (sanitized, at most 64
    characters) with `auto_background: false` and Letta's maximum timeout.
 4. Letta sends `external_tool_call_request` frames on the runtime's channel; the session runs the call with

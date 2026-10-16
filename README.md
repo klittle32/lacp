@@ -129,6 +129,8 @@ Open the Agent Panel, click **+**, and choose **Letta Code**. If Zed cannot find
 
 - Command: `lacp` (or its absolute path)
 - Environment: `LACP_AUTH=cloud-oauth` and `LETTA_AGENT_ID=agent-…` (or `LACP_AUTH=api-key` with `LETTA_API_KEY`)
+- Letta's notices (a retried model request, an error, an MCP server that did not start) show as rows in the
+  turn's work log: T3 Code's ACP version has no notices of its own.
 - To see what `lacp` logs, add `LACP_LOG_FILE=~/lacp.log` (and `LACP_LOG_LEVEL=debug`, or `trace` for every
   App Server frame): T3 Code does not keep an agent's stderr.
 

@@ -86,7 +86,7 @@ describe("client MCP servers", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const client = yield* start(fake)
-      yield* client.request("initialize", initializeHybrid)
+      yield* client.request("initialize", { ...initializeHybrid, info: { name: "other-client", version: "1.0.0" } })
       const created = yield* client.request("session/new", {
         cwd,
         mcpServers: [v2Server, { type: "stdio", name: "broken", command: "/nonexistent/server", args: [], env: [] }]
@@ -97,6 +97,22 @@ describe("client MCP servers", () => {
       assert.strictEqual(notice.title, "MCP server \"broken\" is unavailable")
       const runtimeStart = (yield* Ref.get(fake.commands)).find((c) => c.type === "runtime_start") as any
       assert.include(toolNames(runtimeStart), "mcp__fixture__echo")
+    }))
+
+  it.live("tells T3 Code about a failed server with a tool call, which it shows", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      yield* client.request("session/new", {
+        cwd,
+        mcpServers: [{ type: "stdio", name: "broken", command: "/nonexistent/server", args: [], env: [] }]
+      })
+      const row = yield* client.update((u) => u.sessionUpdate === "tool_call_update")
+      assert.strictEqual(row.title, "MCP server \"broken\" is unavailable")
+      assert.strictEqual(row.status, "completed")
+      assert.match(row.toolCallId, /^notice-[0-9a-f-]{36}-1$/)
+      assert.isFalse((yield* client.updates).some((u) => u.sessionUpdate === "notice"))
     }))
 
   it.live("starts without external tools when the client offers no servers", () =>
