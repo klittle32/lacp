@@ -26,6 +26,7 @@ import { layerWebSocket, LettaAppServer } from "./letta/AppServer.ts"
 import { LettaExecutable, type LettaInstall } from "./letta/Executable.ts"
 import * as Login from "./letta/Login.ts"
 import { ListModelsResponse, type PermissionMode } from "./letta/Protocol.ts"
+import * as LogFile from "./LogFile.ts"
 import { VERSION } from "./Version.ts"
 
 class InvalidConfiguration extends Schema.TaggedError<InvalidConfiguration, { readonly brand: unique symbol }>()(
@@ -114,6 +115,13 @@ const flags = {
     Flag.withDescription("Seconds to wait for the Letta Code App Server to start. Env: LACP_STARTUP_TIMEOUT"),
     Flag.withFallbackConfig(Config.Int("LACP_STARTUP_TIMEOUT")),
     Flag.withDefault(60)
+  ),
+  logFile: Flag.String("log-file").pipe(
+    Flag.withDescription(
+      "Also append the server's log to this file (T3 Code keeps no agent stderr). Env: LACP_LOG_FILE"
+    ),
+    Flag.withFallbackConfig(Config.String("LACP_LOG_FILE")),
+    Flag.optional
   )
 }
 
@@ -129,6 +137,7 @@ type Flags = {
   readonly echoPrompts: boolean
   readonly waitForBackground: boolean
   readonly startupTimeout: number
+  readonly logFile: Option.Option<string>
 }
 
 /** Builds the configuration from parsed flags plus `LETTA_API_KEY`. */
@@ -190,7 +199,9 @@ const lacp = root.pipe(
       yield* server.serve
     })
   ),
-  Command.provide((input) => ServerLayer.pipe(Layer.provide(configLayer(input))))
+  Command.provide((input) =>
+    ServerLayer.pipe(Layer.provide(configLayer(input)), Layer.provideMerge(LogFile.layer(input.logFile)))
+  )
 )
 
 const setup = Command.make("setup", {}, () =>

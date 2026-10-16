@@ -39,7 +39,8 @@
           "effect/encoding",
           "effect/http",
           "effect/cli",
-          "effect/testing"
+          "effect/testing",
+          "effect/Logger#toFile"
         ],
         "diagnosticSeverity": {}
       }

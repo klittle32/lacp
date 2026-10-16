@@ -68,6 +68,7 @@ Letta agent to talk to. Everything can be set through environment variables in y
 | Wait for background   | `LACP_WAIT_FOR_BACKGROUND` | `--no-wait-for-background` | `true` (default) or `false`: keep a turn open until the background subagents it started report back. See below                                                            |
 | Startup timeout       | `LACP_STARTUP_TIMEOUT`     | `--startup-timeout`        | Seconds to wait for the App Server (default `60`)                                                                                                                         |
 | Log level             | `LACP_LOG_LEVEL`           | `--log-level`              | `debug`, `info` (default), `warn`, … (any case). `trace` also logs every App Server frame. Logs go to stderr                                                              |
+| Log file              | `LACP_LOG_FILE`            | `--log-file`               | Also append the server's log to this file (`~/` is your home). Useful in T3 Code, which keeps none of an agent's stderr                                                   |
 
 Self-hosted Letta servers work through Letta Code's own `LETTA_BASE_URL` setting.
 
@@ -128,6 +129,8 @@ Open the Agent Panel, click **+**, and choose **Letta Code**. If Zed cannot find
 
 - Command: `lacp` (or its absolute path)
 - Environment: `LACP_AUTH=cloud-oauth` and `LETTA_AGENT_ID=agent-…` (or `LACP_AUTH=api-key` with `LETTA_API_KEY`)
+- To see what `lacp` logs, add `LACP_LOG_FILE=~/lacp.log` (and `LACP_LOG_LEVEL=debug`, or `trace` for every
+  App Server frame): T3 Code does not keep an agent's stderr.
 
 T3 Code nightly speaks the ACP v2 draft, so `lacp` negotiates v2 with it: turns end with `state_update`, shell
 commands appear as terminals, and edits arrive as git patches. Prompts are not echoed back (`LACP_ECHO_PROMPTS`):
