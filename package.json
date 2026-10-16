@@ -1,0 +1,50 @@
+{
+  "name": "@klittle32/lacp",
+  "version": "0.1.0",
+  "description": "An Agent Client Protocol (ACP) server for Letta Code, written in Effect",
+  "keywords": ["acp", "agent-client-protocol", "letta", "letta-code", "effect", "zed"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/klittle32/lacp.git"
+  },
+  "license": "MIT",
+  "author": "Kyle Little <klittle32@gmail.com>",
+  "type": "module",
+  "bin": {
+    "lacp": "./dist/main.js"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "prepare": "effect-tsgo patch --typescript --oxlint",
+    "check": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/main.js",
+    "dev": "node src/main.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "oxlint && dprint check",
+    "lint-fix": "oxlint --fix && dprint fmt",
+    "format": "dprint fmt",
+    "diagnostics": "effect-tsgo diagnostics --project tsconfig.json",
+    "verify": "npm run check && npm run lint && npm test"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.5",
+    "effect": "4.0.5"
+  },
+  "devDependencies": {
+    "@dprint/json": "0.25.2",
+    "@dprint/markdown": "0.26.0",
+    "@dprint/typescript": "0.96.1",
+    "@effect/tsgo": "0.53.2",
+    "@effect/vitest": "4.0.5",
+    "@types/node": "^26.6.5",
+    "dprint": "0.63.0",
+    "oxlint": "1.88.0",
+    "oxlint-tsgolint": "7.0.2004",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}

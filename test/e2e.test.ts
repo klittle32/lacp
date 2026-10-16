@@ -1,0 +1,112 @@
+/**
+ * End-to-end: the full server against a real Letta Code install, using Letta's
+ * offline deterministic backend (no network, no credentials).
+ *
+ * Opt-in: set LACP_E2E_LETTA to a `letta` executable (or `letta.js`), e.g.
+ *
+ *   LACP_E2E_LETTA=$(command -v letta) npm test
+ */
+import { NodeServices } from "@effect/platform-node"
+import { assert, describe, it } from "@effect/vitest"
+import { Effect, FileSystem, Layer, Option, Path } from "effect"
+import { layerWebSocket, LettaAppServer } from "../src/letta/AppServer.ts"
+import { LettaExecutable } from "../src/letta/Executable.ts"
+import { allowOnce, initializeHybrid, initializeV1, startWith } from "./helpers/AcpClient.ts"
+
+// oxlint-disable-next-line effecttsgo/process-env -- test-only opt-in switch
+const letta = process.env["LACP_E2E_LETTA"]
+
+const realLetta = LettaAppServer.layer.pipe(Layer.provide(LettaExecutable.layer), Layer.provide(layerWebSocket))
+
+const startReal = Effect.gen(function*() {
+  const fs = yield* FileSystem.FileSystem
+  const path = yield* Path.Path
+  const home = yield* fs.makeTempDirectoryScoped({ prefix: "lacp-e2e-home-" })
+  const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "lacp-e2e-project-" })
+  const client = yield* startWith(realLetta, {
+    config: {
+      auth: "local",
+      lettaPath: Option.fromUndefinedOr(letta),
+      permissionMode: Option.some("standard")
+    },
+    host: {
+      cwd,
+      home,
+      env: {
+        // oxlint-disable-next-line effecttsgo/process-env -- the child needs the real PATH
+        PATH: process.env["PATH"] ?? "",
+        HOME: home,
+        DISABLE_AUTOUPDATER: "1",
+        LETTA_CODE_TELEM: "0",
+        DO_NOT_TRACK: "1",
+        LETTA_BASE_URL: "http://127.0.0.1:9",
+        LETTA_LOCAL_BACKEND_EXECUTOR: "deterministic-reflection"
+      },
+      execPath: process.execPath
+    }
+  })
+  return { client, cwd, path }
+})
+
+describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
+  it.live("ACP v2: prompt, approval, terminal output, list and resume with replay", () =>
+    Effect.gen(function*() {
+      const { client, cwd } = yield* startReal
+      yield* client.setPermissionPolicy(allowOnce)
+      const init = yield* client.request("initialize", initializeHybrid)
+      assert.strictEqual(init.result.protocolVersion, 2)
+
+      const created = yield* client.request("session/new", { cwd })
+      const sessionId = created.result.sessionId as string
+      assert.isString(sessionId)
+      assert.strictEqual(created.result.configOptions[0].currentValue, "standard")
+
+      const first = yield* client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] })
+      assert.isString(first.result.messageId)
+      yield* client.update((u) => u.sessionUpdate === "agent_message_chunk" && u.content.text === "pong")
+      yield* client.update((u) => u.sessionUpdate === "state_update" && u.state === "idle")
+
+      // Letta may still be finishing background work (e.g. reflection) from the first
+      // turn, so anchor on the second prompt's own user message.
+      const second = yield* client.request("session/prompt", {
+        sessionId,
+        prompt: [{ type: "text", text: "please inspect $TRANSCRIPT_PATH" }]
+      })
+      yield* client.update((u) => u.sessionUpdate === "user_message" && u.messageId === second.result.messageId)
+      const from = (yield* client.updates).findIndex((u) => u.messageId === second.result.messageId)
+      yield* client.update((u) => u.sessionUpdate === "state_update" && u.state === "idle", from)
+      const turn = (yield* client.updates).slice(from)
+      assert.isTrue(turn.some((u) => u.sessionUpdate === "state_update" && u.state === "requires_action"))
+      assert.isTrue(turn.some((u) => u.sessionUpdate === "terminal_update" && u.command !== undefined))
+      assert.isTrue(
+        turn.some((u) => u.sessionUpdate === "tool_call_update" && (u.status === "completed" || u.status === "failed"))
+      )
+      const [permission] = yield* client.agentRequests
+      assert.strictEqual(permission?.method, "session/request_permission")
+
+      const listed = yield* client.request("session/list", { cwd })
+      assert.include(listed.result.sessions.map((s: any) => s.sessionId), sessionId)
+
+      const resumedFrom = (yield* client.updates).length
+      const resumed = yield* client.request("session/resume", { sessionId, cwd, replayFrom: { type: "start" } })
+      assert.isDefined(resumed.result.configOptions)
+      const replayed = (yield* client.updates).slice(resumedFrom)
+      assert.isTrue(replayed.some((u) => u.sessionUpdate === "agent_message_chunk" && u.content.text === "pong"))
+      assert.isTrue(replayed.some((u) => u.sessionUpdate === "user_message_chunk" && u.content.text.includes("hello")))
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), 180_000)
+
+  it.live("ACP v1: session/prompt resolves with end_turn", () =>
+    Effect.gen(function*() {
+      const { client, cwd } = yield* startReal
+      yield* client.request("initialize", initializeV1)
+      const created = yield* client.request("session/new", { cwd, mcpServers: [] })
+      const reply = yield* client.request("session/prompt", {
+        sessionId: created.result.sessionId,
+        prompt: [{ type: "text", text: "hello" }]
+      })
+      assert.deepStrictEqual(reply.result, { stopReason: "end_turn" })
+      assert.isTrue(
+        (yield* client.updates).some((u) => u.sessionUpdate === "agent_message_chunk" && u.content.text === "pong")
+      )
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), 180_000)
+})

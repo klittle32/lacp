@@ -1,0 +1,73 @@
+{
+  "$schema": "./node_modules/@effect/tsgo/oxlint-schema.json",
+  "extends": [
+    "./node_modules/@effect/tsgo/oxlint-presets/recommended.json"
+  ],
+  "plugins": [
+    "typescript",
+    "import",
+    "oxc",
+    "eslint",
+    "unicorn",
+    "node"
+  ],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error"
+  },
+  "rules": {
+    "typescript/consistent-type-imports": [
+      "error",
+      {
+        "fixStyle": "inline-type-imports"
+      }
+    ],
+    "typescript/no-import-type-side-effects": "error",
+    "import/no-duplicates": "error",
+    "eslint/no-console": "error",
+    "eslint/require-yield": "off",
+    "eslint/no-shadow": "off",
+    "unicorn/consistent-function-scoping": "off",
+    "typescript/array-type": [
+      "error",
+      {
+        "default": "generic",
+        "readonly": "generic"
+      }
+    ],
+    "typescript/no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_"
+      }
+    ],
+    "no-underscore-dangle": "off",
+    "oxc/no-map-spread": "off"
+  },
+  "ignorePatterns": [
+    "dist",
+    "test/fixtures",
+    "node_modules"
+  ],
+  "overrides": [
+    {
+      "files": [
+        "test/**",
+        "src/main.ts"
+      ],
+      "rules": {
+        "effecttsgo/strict-effect-provide": "off",
+        "effecttsgo/any-unknown-in-error-context": "off",
+        "typescript/no-unsafe-type-assertion": "off",
+        "typescript/no-explicit-any": "off",
+        "typescript/no-unsafe-argument": "off",
+        "typescript/no-unsafe-member-access": "off",
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-call": "off",
+        "typescript/no-unsafe-return": "off"
+      }
+    }
+  ]
+}

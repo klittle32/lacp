@@ -1,2 +1,171 @@
 # lacp
-An acp server implementation for letta code written in Effect ts
+
+An [Agent Client Protocol](https://github.com/agentclientprotocol/agent-client-protocol) (ACP) server for
+[Letta Code](https://github.com/letta-ai/letta-code), written in [Effect](https://github.com/Effect-TS/effect) v4.
+
+`lacp` lets any ACP client — Zed, T3 Code, JetBrains IDEs, Neovim and Emacs plugins — talk to your Letta agents.
+It does not bundle its own copy of Letta Code: it drives **the Letta Code already installed on your machine**, so
+your login, settings, permission rules, skills, hooks, subagents, MCP servers and **mods** all carry over exactly
+as they are in your terminal.
+
+- **ACP v1 and v2.** Every connection negotiates the best version both sides support. v1 (stable) works with every
+  client; the v2 draft is used with clients that ask for it, such as T3 Code nightly.
+- **Your Letta Code, not a copy.** `lacp` finds the host's `letta` (PATH, global npm/bun/pnpm installs, your login
+  shell) and runs it as an App Server (`letta server --listen`).
+- **One process, many sessions.** A single App Server serves every ACP session; it is started on demand and
+  restarted transparently if it dies.
+- **Editor-native experience.** Streaming answers and reasoning, tool calls with diffs and file locations, shell
+  commands as terminals, permission prompts (including Letta's "always allow" rules), plans, slash commands
+  (including mod commands), mode and model switching, session list / load / resume with history replay, usage.
+
+## Requirements
+
+- Node.js 22.19 or newer
+- Letta Code 0.30 or newer, installed globally:
+
+  ```sh
+  npm install -g @letta-ai/letta-code
+  letta setup   # once, to sign in (or use an API key, below)
+  ```
+
+## Install
+
+From source (until the package is published):
+
+```sh
+git clone https://github.com/klittle32/lacp.git
+cd lacp
+npm install
+npm run build
+npm link        # puts `lacp` on your PATH
+```
+
+Check that everything is found:
+
+```sh
+lacp doctor
+```
+
+## Configure your editor
+
+`lacp` is configured the same way as Letta's own ACP adapter: choose how to authenticate and, optionally, which
+Letta agent to talk to. Everything can be set through environment variables in your editor's agent settings.
+
+| Setting               | Env var                | Flag                | Values                                                                                                                                                                    |
+| --------------------- | ---------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Authentication        | `LACP_AUTH`            | `--auth`            | `host` (default: whatever your Letta Code uses), `cloud-oauth` (the login from `letta setup`), `api-key` (with `LETTA_API_KEY`), `local` (Letta Code's on-device backend) |
+| API key               | `LETTA_API_KEY`        | —                   | Your Letta API key (for `api-key`)                                                                                                                                        |
+| Agent                 | `LETTA_AGENT_ID`       | `--agent-id`        | A Letta agent id. Default: the agent you last used in that project (as `letta` would), otherwise a new one                                                                |
+| Model                 | `LACP_MODEL`           | `--model`           | A model handle for new sessions, e.g. `anthropic/claude-sonnet-4-5`                                                                                                       |
+| Permission mode       | `LACP_PERMISSION_MODE` | `--permission-mode` | `standard`, `acceptEdits`, `unrestricted`, `strict`. Default: your Letta Code setting                                                                                     |
+| Letta Code executable | `LACP_LETTA_PATH`      | `--letta-path`      | Path to `letta`, if discovery does not find it                                                                                                                            |
+| Existing App Server   | `LACP_APP_SERVER_URL`  | `--app-server-url`  | Connect to a running `letta server --listen ws://…` instead of starting one                                                                                               |
+| ACP version           | `LACP_ACP_VERSION`     | `--acp-version`     | `2` (default: negotiate v1 or v2) or `1` (never negotiate the v2 draft)                                                                                                   |
+| Startup timeout       | `LACP_STARTUP_TIMEOUT` | `--startup-timeout` | Seconds to wait for the App Server (default `60`)                                                                                                                         |
+| Log level             | `LACP_LOG_LEVEL`       | `--log-level`       | `debug`, `info` (default), `warn`, … Logs go to stderr                                                                                                                    |
+
+Self-hosted Letta servers work through Letta Code's own `LETTA_BASE_URL` setting.
+
+### Zed
+
+```jsonc
+// settings.json
+{
+  "agent_servers": {
+    "Letta Code": {
+      "type": "custom",
+      "command": "lacp",
+      "args": [],
+      "env": {
+        "LACP_AUTH": "cloud-oauth",
+        "LETTA_AGENT_ID": "agent-…"
+      }
+    }
+  }
+}
+```
+
+With an API key instead:
+
+```jsonc
+"env": { "LACP_AUTH": "api-key", "LETTA_API_KEY": "sk-let-…", "LETTA_AGENT_ID": "agent-…" }
+```
+
+Open the Agent Panel, click **+**, and choose **Letta Code**. If Zed cannot find `lacp`, use its absolute path
+(`which lacp`): editors launched from the macOS Dock may not see your shell's PATH.
+
+### T3 Code
+
+**Settings → Providers → Add provider → Local ACP command**, then:
+
+- Command: `lacp` (or its absolute path)
+- Environment: `LACP_AUTH=cloud-oauth` and `LETTA_AGENT_ID=agent-…` (or `LACP_AUTH=api-key` with `LETTA_API_KEY`)
+
+T3 Code nightly speaks the ACP v2 draft, so `lacp` negotiates v2 with it: turns end with `state_update`, shell
+commands appear as terminals, and edits arrive as git patches.
+
+### Other ACP clients
+
+Run `lacp` as the agent command with the environment above. Clients that support terminal authentication are
+offered a **Sign in to Letta** method, which runs `lacp setup` (that is, your `letta setup`) in a terminal.
+
+## How it works
+
+```
+ACP client ──stdio, JSON-RPC (ACP v1 or v2)──▶ lacp ──WebSocket──▶ letta server --listen ──▶ Letta Cloud /
+ (Zed, T3 Code, …)                               │                 (your Letta Code install)     local backend
+                                                 └── spawns and supervises ───────┘
+```
+
+- Each ACP session is a Letta **conversation** (the session id is the conversation id) on your agent, attached
+  to the App Server as a runtime with the session's working directory.
+- Tool calls run inside Letta Code, with its permission rules. When Letta needs approval, `lacp` asks the editor
+  (`session/request_permission`) and forwards the answer, including "always allow" suggestions.
+- Modes are Letta Code's permission modes, models come from Letta's model catalog, and slash commands are the
+  App Server's commands plus those contributed by your mods.
+- Ambient variables leaked by a parent Letta session (`AGENT_ID`, `USER_CWD`, `MEMORY_DIR`, …) are removed before
+  `letta` starts, so the editor session cannot accidentally bind to another agent.
+
+More detail: [docs/architecture.md](docs/architecture.md). Why both ACP versions:
+[docs/decisions/0001-acp-version.md](docs/decisions/0001-acp-version.md).
+
+### Known limitations
+
+- MCP servers offered by the client (`mcpServers` in `session/new`) are not bridged yet; configure MCP servers in
+  Letta Code itself. Letta Code's own MCP servers work.
+- Client file-system and terminal capabilities are not used: tools run in Letta Code on your machine.
+- Session forking and deletion are not offered.
+
+## Development
+
+The project uses the toolchain the Effect v4 repository recommends:
+
+| Tool                                                                                       | Purpose                                                                                            |
+| ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| [TypeScript 7](https://github.com/microsoft/typescript-go) (`tsc`, the Go-native compiler) | type checking and builds                                                                           |
+| [`@effect/tsgo`](https://github.com/Effect-TS/tsgo)                                        | the Effect Language Service for TS 7; `npm install` patches `tsc` so it reports Effect diagnostics |
+| [oxlint](https://oxc.rs) + `oxlint-tsgolint`                                               | linting, with the Effect rule presets shipped in `@effect/tsgo`                                    |
+| [dprint](https://dprint.dev)                                                               | formatting                                                                                         |
+| [Vitest](https://vitest.dev) + `@effect/vitest`                                            | tests                                                                                              |
+
+```sh
+npm install          # also runs `effect-tsgo patch`
+npm run check        # tsc with Effect diagnostics
+npm run lint         # oxlint + dprint check
+npm test             # unit and integration tests
+npm run build        # dist/
+npm run dev -- doctor  # run from source (Node type stripping)
+```
+
+End-to-end tests drive a real Letta Code with its offline deterministic backend (no network, no account):
+
+```sh
+LACP_E2E_LETTA="$(command -v letta)" npm test
+```
+
+In VS Code, install the TypeScript 7 (native preview) extension to get the Effect Language Service in the editor;
+`.vscode/settings.json` already points at the workspace TypeScript.
+
+## License
+
+MIT
