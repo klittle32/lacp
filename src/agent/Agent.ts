@@ -74,6 +74,7 @@ import { SessionIds } from "./SessionIds.ts"
 import {
   configOptions,
   decodePermissionMode,
+  DEFAULT_PERMISSION_MODE,
   initialSettings,
   type SessionSettings,
   Settings,
@@ -859,12 +860,12 @@ export class Agent extends Context.Service<Agent, {
       const settle = Effect.fnUntraced(function*(session: Session, attachment: Attachment) {
         const seen = yield* Deferred.await(session.deviceStatus).pipe(Effect.timeoutOption("5 seconds"))
         if (Option.isNone(seen) && Option.isNone(session.settings.mode)) {
-          // Never assume Letta's own default (unrestricted): ask before acting.
-          session.settings.mode = Option.some("standard")
+          // Letta did not say: make the runtime match the mode the client is shown.
+          session.settings.mode = Option.some(DEFAULT_PERMISSION_MODE)
           yield* attachment.connection.send({
             type: "change_device_state",
             runtime: attachment.runtime,
-            payload: { mode: "standard" }
+            payload: { mode: DEFAULT_PERMISSION_MODE }
           }).pipe(Effect.ignore)
         }
       })
@@ -1042,7 +1043,7 @@ export class Agent extends Context.Service<Agent, {
             settings: initialSettings(
               { agent: Option.getOrNull(agent) },
               models,
-              Option.orElse(config.permissionMode, () => Option.some<PermissionMode>("standard"))
+              Option.orElse(config.permissionMode, () => Option.some(DEFAULT_PERMISSION_MODE))
             ),
             commands: builtinCommands
           })

@@ -41,7 +41,7 @@ export interface LacpConfigShape {
   readonly agentId: Option.Option<string>
   /** Model handle applied to new sessions, e.g. `anthropic/claude-sonnet-4-5`. */
   readonly model: Option.Option<string>
-  /** Initial permission mode; when absent the host's configured mode is used. */
+  /** Permission mode of new sessions (and of reopened ones, whose own mode it then overrides). */
   readonly permissionMode: Option.Option<PermissionMode>
   /** Explicit `letta` executable, bypassing discovery. */
   readonly lettaPath: Option.Option<string>

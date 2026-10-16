@@ -65,7 +65,7 @@ const flags = {
     Flag.optional
   ),
   permissionMode: Flag.Literals("permission-mode", PERMISSION_MODES).pipe(
-    Flag.withDescription("Initial permission mode (default: the host's). Env: LACP_PERMISSION_MODE"),
+    Flag.withDescription("Permission mode of new sessions (default: unrestricted). Env: LACP_PERMISSION_MODE"),
     Flag.withFallbackConfig(Config.Literals(PERMISSION_MODES, "LACP_PERMISSION_MODE")),
     Flag.optional
   ),

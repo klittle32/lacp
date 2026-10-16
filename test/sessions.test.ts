@@ -34,7 +34,10 @@ describe("lazy conversations", () => {
       const sessionId = created.result.sessionId as string
       assert.match(sessionId, /^lacp-/)
       assert.notStrictEqual(sessionId, probe.result.sessionId)
-      assert.strictEqual(created.result.configOptions.find((o: any) => o.configId === "mode").currentValue, "standard")
+      assert.strictEqual(
+        created.result.configOptions.find((o: any) => o.configId === "mode").currentValue,
+        "unrestricted"
+      )
       assert.strictEqual((yield* sent(fake, "create_agent")).length, 0)
       assert.strictEqual((yield* sent(fake, "runtime_start")).length, 0)
 
@@ -42,7 +45,7 @@ describe("lazy conversations", () => {
       assert.strictEqual((yield* sent(fake, "create_agent")).length, 1)
       const [runtimeStart] = yield* sent(fake, "runtime_start")
       assert.deepStrictEqual(runtimeStart.create_conversation, { body: {} })
-      assert.strictEqual(runtimeStart.mode, "standard")
+      assert.strictEqual(runtimeStart.mode, "unrestricted")
       const input = (yield* fake.waitFor(isInput)) as any
       assert.strictEqual(input.runtime.conversation_id, yield* fake.conversation)
     }))
@@ -68,6 +71,19 @@ describe("lazy conversations", () => {
       yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
       const [runtimeStart] = yield* sent(fake, "runtime_start")
       assert.strictEqual(runtimeStart.mode, "acceptEdits")
+    }))
+
+  it.live("starts new sessions in the mode LACP_PERMISSION_MODE sets", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const client = yield* start(fake, { permissionMode: Option.some("strict") })
+      yield* client.request("initialize", initializeHybrid)
+      const created = yield* client.request("session/new", { cwd: "/work" })
+      const sessionId = created.result.sessionId as string
+      assert.strictEqual(created.result.configOptions.find((o: any) => o.configId === "mode").currentValue, "strict")
+      yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
+      const [runtimeStart] = yield* sent(fake, "runtime_start")
+      assert.strictEqual(runtimeStart.mode, "strict")
     }))
 
   it.live("reopens a session closed before its first prompt, still without a conversation", () =>

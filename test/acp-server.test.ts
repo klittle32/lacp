@@ -88,7 +88,7 @@ describe("ACP v1 sessions", () => {
       const fake = yield* Fake.make
       const { client, created, sessionId } = yield* setup(fake)
       assert.match(sessionId, /^lacp-[0-9a-f-]{36}$/)
-      assert.strictEqual(created.result.modes.currentModeId, "standard")
+      assert.strictEqual(created.result.modes.currentModeId, "unrestricted")
       const [model, effort, mode] = created.result.configOptions
       assert.strictEqual(effort.id, "effort")
       assert.strictEqual(mode.id, "mode")

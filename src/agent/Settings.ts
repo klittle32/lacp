@@ -41,6 +41,9 @@ const MODES: ReadonlyArray<{ readonly value: PermissionMode; readonly name: stri
 
 export const decodePermissionMode = Schema.decodeUnknownOption(PermissionModeSchema)
 
+/** The mode of new sessions (and of sessions Letta reports none for), unless `LACP_PERMISSION_MODE` sets one. */
+export const DEFAULT_PERMISSION_MODE: PermissionMode = "unrestricted"
+
 /** A session's settings as Letta last reported them, updated in place as they change. */
 export interface SessionSettings {
   mode: Option.Option<PermissionMode>
@@ -101,7 +104,7 @@ export const configOptions = (settings: SessionSettings): ReadonlyArray<ConfigOp
     name: "Mode",
     description: "When Letta Code asks before running tools",
     category: "mode",
-    currentValue: Option.getOrElse(settings.mode, () => "standard"),
+    currentValue: Option.getOrElse(settings.mode, () => DEFAULT_PERMISSION_MODE),
     options: MODES.map((m) => ({ value: m.value, name: m.name, description: m.description }))
   })
   return options
