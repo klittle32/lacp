@@ -59,6 +59,7 @@ import {
   type RuntimeScope,
   RuntimeStartResponse,
   StreamDelta,
+  SubagentState,
   TurnFinished
 } from "../letta/Protocol.ts"
 import * as Translator from "../letta/Translator.ts"
@@ -130,6 +131,7 @@ const decodeControlRequest = decode(ControlRequest)
 const decodeLoopStatus = decode(LoopStatus)
 const decodeDeviceStatus = decode(DeviceStatus)
 const decodeQueueUpdate = decode(QueueUpdate)
+const decodeSubagentState = decode(SubagentState)
 const decodeExternalToolCall = decode(ExternalToolCallRequest)
 
 /** Letta stop reasons onto ACP stop reasons. */
@@ -175,6 +177,16 @@ interface Turn {
   readonly done: Deferred.Deferred<TurnResult>
   /** Letta runs seen in this turn's stream, so a turn ended locally can disown them. */
   readonly runs: Set<string>
+  /** Background subagents already running when the turn began; the turn does not wait for them. */
+  readonly preexisting: ReadonlySet<string>
+  /**
+   * The result Letta reported, held while background work the turn started is
+   * outstanding: its report arrives in a follow-up turn, which the client only
+   * shows while this turn is open.
+   */
+  held: Option.Option<TurnResult>
+  /** A follow-up turn has started streaming into the held turn. */
+  followUp: boolean
 }
 
 interface Attachment {
@@ -199,6 +211,10 @@ interface Session {
   readonly ownMessages: Set<string>
   /** Runs of turns lacp ended itself; their late frames are ignored. */
   readonly abandonedRuns: Set<string>
+  /** Running background subagents that will report back (not silent). */
+  backgroundSubagents: ReadonlySet<string>
+  /** Reports of finished background work waiting in Letta's queue. */
+  queuedNotifications: number
   /** The client's MCP servers this session was opened with. */
   readonly mcpServers: ReadonlyArray<McpServerConfig>
   turn: Option.Option<Turn>
@@ -352,12 +368,50 @@ export class Agent extends Context.Service<Agent, {
               yield* emit(session, { _tag: "Usage", used, size: session.settings.contextWindow.value })
             }
           }
-          yield* completeTurn(session, {
+          const result: TurnResult = {
             stopReason,
             error: stopReason === "error"
               ? Option.some({ code: -32603, message: message ?? `Letta Code stopped: ${frame.stop_reason}` })
               : Option.none()
-          })
+          }
+          if (Option.isSome(turn) && awaitsBackground(session, turn.value)) {
+            if (Option.isNone(turn.value.held)) {
+              yield* Effect.logInfo(`Keeping the turn open until its background work in ${session.id} reports back`)
+            }
+            turn.value.held = Option.some(result)
+            turn.value.followUp = false
+            return
+          }
+          yield* completeTurn(session, result)
+        })
+
+      /** Whether a turn has background work outstanding that will report back into the conversation. */
+      const awaitsBackground = (session: Session, turn: Turn) =>
+        config.waitForBackground &&
+        (session.queuedNotifications > 0 ||
+          Array.from(session.backgroundSubagents).some((id) => !turn.preexisting.has(id)))
+
+      /**
+       * Ends a held turn once its background work is done. The report starts a
+       * follow-up turn, whose end ends the held turn; if none starts within the
+       * grace period, the held result stands.
+       */
+      const releaseWhenSettled = (session: Session) =>
+        Effect.suspend(() => {
+          const turn = Option.getOrUndefined(session.turn)
+          if (turn === undefined || Option.isNone(turn.held) || turn.followUp || awaitsBackground(session, turn)) {
+            return Effect.void
+          }
+          return Effect.sleep(config.backgroundGrace).pipe(
+            Effect.andThen(Effect.suspend(() =>
+              Option.exists(session.turn, (current) => current === turn) && Option.isSome(turn.held) &&
+                !turn.followUp && !awaitsBackground(session, turn)
+                ? completeTurn(session, turn.held.value)
+                : Effect.void
+            )),
+            Effect.forkIn(session.scope),
+            Effect.asVoid
+          )
         })
 
       const decide = (decision: PermissionDecision) => {
@@ -411,6 +465,7 @@ export class Agent extends Context.Service<Agent, {
           // Output of a turn lacp already ended (a cancel Letta never confirmed) is dropped.
           if (Option.isSome(run) && session.abandonedRuns.has(run.value)) return
           if (Option.isSome(run) && Option.isSome(session.turn)) session.turn.value.runs.add(run.value)
+          if (Option.isSome(session.turn) && Option.isSome(session.turn.value.held)) session.turn.value.followUp = true
           for (const item of session.translator.delta(frame.delta)) {
             switch (item._tag) {
               case "UserEcho": {
@@ -548,11 +603,31 @@ export class Agent extends Context.Service<Agent, {
               onNone: () => Effect.void,
               onSome: (f) => onExternalToolCall(session, attachment, f)
             })
+          case "update_subagent_state":
+            return Option.match(decodeSubagentState(frame.raw), {
+              onNone: () => Effect.void,
+              onSome: (f) =>
+                Effect.suspend(() => {
+                  session.backgroundSubagents = new Set(
+                    f.subagents
+                      .filter((a) =>
+                        a.is_background === true && a.silent !== true &&
+                        (a.status === "pending" || a.status === "running")
+                      )
+                      .map((a) => a.subagent_id)
+                  )
+                  return releaseWhenSettled(session)
+                })
+            })
           case "update_queue":
             return Option.match(decodeQueueUpdate(frame.raw), {
               onNone: () => Effect.void,
               onSome: (f) =>
                 Effect.gen(function*() {
+                  if (f.queue !== undefined) {
+                    session.queuedNotifications = f.queue.filter((item) => item.kind === "task_notification").length
+                    yield* releaseWhenSettled(session)
+                  }
                   const turn = session.turn
                   if (Option.isNone(turn)) return
                   for (const removed of f.removed ?? []) {
@@ -713,6 +788,8 @@ export class Agent extends Context.Service<Agent, {
           commands: [],
           ownMessages: new Set(),
           abandonedRuns: new Set(),
+          backgroundSubagents: new Set(),
+          queuedNotifications: 0,
           mcpServers,
           turn: Option.none(),
           foreground: "idle",
@@ -1041,7 +1118,10 @@ export class Agent extends Context.Service<Agent, {
           started: true,
           error: Option.none(),
           done,
-          runs: new Set()
+          runs: new Set(),
+          preexisting: new Set(session.backgroundSubagents),
+          held: Option.none(),
+          followUp: false
         })
         session.localCommand = true
         yield* emit(session, { _tag: "UserMessage", messageId, content: prompt })
@@ -1096,7 +1176,10 @@ export class Agent extends Context.Service<Agent, {
             started: false,
             error: Option.none(),
             done,
-            runs: new Set()
+            runs: new Set(),
+            preexisting: new Set(session.backgroundSubagents),
+            held: Option.none(),
+            followUp: false
           }
           session.turn = Option.some(turn)
           session.ownMessages.add(clientMessageId)
@@ -1142,6 +1225,11 @@ export class Agent extends Context.Service<Agent, {
         const session = sessions.get(sessionId)
         if (session === undefined || Option.isNone(session.turn)) return
         const turn = session.turn.value
+        // Only waiting for background work: stop waiting (the work itself carries on in Letta).
+        if (Option.isSome(turn.held) && !turn.followUp) {
+          yield* completeTurn(session, { stopReason: "cancelled", error: Option.none() })
+          return
+        }
         const attachment = session.attachment
         if (Option.isSome(attachment)) {
           yield* attachment.value.connection.call(

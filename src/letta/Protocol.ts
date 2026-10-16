@@ -400,12 +400,27 @@ export type DeviceStatus = typeof DeviceStatus.Type
 export const QueueUpdate = Schema.Struct({
   type: Schema.Literal("update_queue"),
   runtime: RuntimeScope,
+  /** What is waiting to run; a finished background task reports back as a `task_notification` item. */
+  queue: opt(Schema.Array(Schema.Struct({ kind: Schema.String }))),
   removed: opt(Schema.Array(Schema.Struct({
     client_message_id: Schema.String,
     disposition: Schema.String
   })))
 })
 export type QueueUpdate = typeof QueueUpdate.Type
+
+/** The conversation's subagents (a full snapshot), sent whenever one changes state. */
+export const SubagentState = Schema.Struct({
+  type: Schema.Literal("update_subagent_state"),
+  subagents: Schema.Array(Schema.Struct({
+    subagent_id: Schema.String,
+    status: Schema.String,
+    is_background: optNull(Schema.Boolean),
+    /** Silent subagents (Letta's own reflection and memory work) never report back. */
+    silent: optNull(Schema.Boolean)
+  }))
+})
+export type SubagentState = typeof SubagentState.Type
 
 export const ExternalToolCallRequest = Schema.Struct({
   type: Schema.Literal("external_tool_call_request"),

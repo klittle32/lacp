@@ -102,6 +102,31 @@ export const delta = (conversationId: string, payload: Record<string, unknown>) 
   delta: payload
 })
 
+/** `update_subagent_state`: the conversation's subagents (background and reporting back unless said otherwise). */
+export const subagents = (
+  conversationId: string,
+  list: ReadonlyArray<
+    { readonly id: string; readonly status: string; readonly background?: boolean; readonly silent?: boolean }
+  >
+) => ({
+  type: "update_subagent_state",
+  ...envelope(conversationId, 3),
+  subagents: list.map((a) => ({
+    subagent_id: a.id,
+    status: a.status,
+    is_background: a.background ?? true,
+    silent: a.silent ?? false
+  }))
+})
+
+/** `update_queue` with items of the given kinds waiting. */
+export const queue = (conversationId: string, kinds: ReadonlyArray<string>) => ({
+  type: "update_queue",
+  ...envelope(conversationId, 4),
+  queue: kinds.map((kind, i) => ({ id: `q-${i}`, kind })),
+  removed: []
+})
+
 export const turnFinished = (conversationId: string, stopReason = "end_turn", extra: Record<string, unknown> = {}) => ({
   type: "turn_finished",
   ...envelope(conversationId, 2),

@@ -120,8 +120,19 @@ const isTextPart = Schema.is(TextPart)
 const contentText = (content: string | ReadonlyArray<unknown>): string =>
   typeof content === "string" ? content : content.filter(isTextPart).map((part) => part.text).join("")
 
-/** Removes the `<system-reminder>` context blocks Letta Code injects into user messages. */
-const stripReminders = (text: string) => text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim()
+/**
+ * Removes what Letta Code injects into user messages: `<system-reminder>`
+ * context, and the `<task-notification>` reports of finished background work
+ * (with the transcript line that may follow), which the agent's reply covers.
+ */
+const stripInjected = (text: string) =>
+  text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+    .replace(
+      /<task-notification>[\s\S]*?(?:<\/task-notification>|$)(?:\s*Full transcript available at:[^\n]*\n?)?/g,
+      ""
+    )
+    .trim()
 
 const clip = (text: string) => (text.length > MAX_OUTPUT ? `${text.slice(0, MAX_OUTPUT)}\n… (truncated)` : text)
 
@@ -370,7 +381,7 @@ export const make = (context: TranslatorContext): Translator => {
         return Option.match(decodeUser(delta), {
           onNone: () => [],
           onSome: (d) => {
-            const text = stripReminders(contentText(d.content))
+            const text = stripInjected(contentText(d.content))
             if (text === "") return []
             return [{
               _tag: "UserEcho",

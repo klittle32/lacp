@@ -184,6 +184,23 @@ describe("Translator", () => {
       }
     }))
 
+  it.effect("drops the task notifications Letta injects as user messages, live and in history", () =>
+    Effect.gen(function*() {
+      const t = yield* make
+      const notification = "<task-notification>\n<task-id>task_1</task-id>\n<summary>Agent finished</summary>\n" +
+        "</task-notification>\nFull transcript available at: /tmp/task_1.log\n"
+      assert.deepStrictEqual(t.delta({ message_type: "user_message", id: "u1", content: notification }), [])
+      assert.deepStrictEqual(t.history({ message_type: "user_message", id: "u2", content: notification }), [])
+      assert.deepStrictEqual(
+        t.history({ message_type: "user_message", id: "u3", content: `${notification}and also this` }),
+        [{
+          _tag: "UserMessageChunk",
+          messageId: "u3",
+          content: { type: "text", text: "and also this" }
+        }]
+      )
+    }))
+
   it.effect("closes open tool calls when a turn ends", () =>
     Effect.gen(function*() {
       const t = yield* make

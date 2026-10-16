@@ -53,20 +53,21 @@ lacp doctor
 `lacp` is configured the same way as Letta's own ACP adapter: choose how to authenticate and, optionally, which
 Letta agent to talk to. Everything can be set through environment variables in your editor's agent settings.
 
-| Setting               | Env var                | Flag                | Values                                                                                                                                                                    |
-| --------------------- | ---------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Authentication        | `LACP_AUTH`            | `--auth`            | `host` (default: whatever your Letta Code uses), `cloud-oauth` (the login from `letta setup`), `api-key` (with `LETTA_API_KEY`), `local` (Letta Code's on-device backend) |
-| API key               | `LETTA_API_KEY`        | —                   | Your Letta API key (for `api-key`)                                                                                                                                        |
-| Agent                 | `LETTA_AGENT_ID`       | `--agent-id`        | A Letta agent id. Default: the agent you last used in that project (as `letta` would), otherwise a new one                                                                |
-| Model                 | `LACP_MODEL`           | `--model`           | A model handle for new sessions, e.g. `anthropic/claude-sonnet-4-5`                                                                                                       |
-| Permission mode       | `LACP_PERMISSION_MODE` | `--permission-mode` | `standard`, `acceptEdits`, `unrestricted`, `strict`. Default: your Letta Code setting                                                                                     |
-| Letta Code executable | `LACP_LETTA_PATH`      | `--letta-path`      | Path to `letta`, if discovery does not find it                                                                                                                            |
-| Letta Code runtime    | `LACP_LETTA_RUNTIME`   | `--letta-runtime`   | `auto` (default), `node` or `bun`: what runs Letta Code. See [Node or Bun](#node-or-bun)                                                                                  |
-| Existing App Server   | `LACP_APP_SERVER_URL`  | `--app-server-url`  | Connect to a running `letta server --listen ws://…` instead of starting one                                                                                               |
-| ACP version           | `LACP_ACP_VERSION`     | `--acp-version`     | `2` (default: negotiate v1 or v2) or `1` (never negotiate the v2 draft)                                                                                                   |
-| Echo prompts          | `LACP_ECHO_PROMPTS`    | `--echo-prompts`    | `false` (default) or `true`. ACP v2 only: send each prompt back to the client as a `user_message`                                                                         |
-| Startup timeout       | `LACP_STARTUP_TIMEOUT` | `--startup-timeout` | Seconds to wait for the App Server (default `60`)                                                                                                                         |
-| Log level             | `LACP_LOG_LEVEL`       | `--log-level`       | `debug`, `info` (default), `warn`, … Logs go to stderr                                                                                                                    |
+| Setting               | Env var                    | Flag                       | Values                                                                                                                                                                    |
+| --------------------- | -------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Authentication        | `LACP_AUTH`                | `--auth`                   | `host` (default: whatever your Letta Code uses), `cloud-oauth` (the login from `letta setup`), `api-key` (with `LETTA_API_KEY`), `local` (Letta Code's on-device backend) |
+| API key               | `LETTA_API_KEY`            | —                          | Your Letta API key (for `api-key`)                                                                                                                                        |
+| Agent                 | `LETTA_AGENT_ID`           | `--agent-id`               | A Letta agent id. Default: the agent you last used in that project (as `letta` would), otherwise a new one                                                                |
+| Model                 | `LACP_MODEL`               | `--model`                  | A model handle for new sessions, e.g. `anthropic/claude-sonnet-4-5`                                                                                                       |
+| Permission mode       | `LACP_PERMISSION_MODE`     | `--permission-mode`        | `standard`, `acceptEdits`, `unrestricted`, `strict`. Default: your Letta Code setting                                                                                     |
+| Letta Code executable | `LACP_LETTA_PATH`          | `--letta-path`             | Path to `letta`, if discovery does not find it                                                                                                                            |
+| Letta Code runtime    | `LACP_LETTA_RUNTIME`       | `--letta-runtime`          | `auto` (default), `node` or `bun`: what runs Letta Code. See [Node or Bun](#node-or-bun)                                                                                  |
+| Existing App Server   | `LACP_APP_SERVER_URL`      | `--app-server-url`         | Connect to a running `letta server --listen ws://…` instead of starting one                                                                                               |
+| ACP version           | `LACP_ACP_VERSION`         | `--acp-version`            | `2` (default: negotiate v1 or v2) or `1` (never negotiate the v2 draft)                                                                                                   |
+| Echo prompts          | `LACP_ECHO_PROMPTS`        | `--echo-prompts`           | `false` (default) or `true`. ACP v2 only: send each prompt back to the client as a `user_message`                                                                         |
+| Wait for background   | `LACP_WAIT_FOR_BACKGROUND` | `--no-wait-for-background` | `true` (default) or `false`: keep a turn open until the background subagents it started report back. See below                                                            |
+| Startup timeout       | `LACP_STARTUP_TIMEOUT`     | `--startup-timeout`        | Seconds to wait for the App Server (default `60`)                                                                                                                         |
+| Log level             | `LACP_LOG_LEVEL`           | `--log-level`              | `debug`, `info` (default), `warn`, … Logs go to stderr                                                                                                                    |
 
 Self-hosted Letta servers work through Letta Code's own `LETTA_BASE_URL` setting.
 
@@ -160,6 +161,12 @@ ACP client ──stdio, JSON-RPC (ACP v1 or v2)──▶ lacp ──WebSocket─
     setting (T3 Code: the traits menu; Zed: a dropdown next to the model).
   - Modes are Letta Code's permission modes.
 - Slash commands are the App Server's commands plus those contributed by your mods.
+- Background subagents, such as a Codex worker started with the Agent tool, report back in a follow-up turn that
+  Letta runs on its own. Clients like T3 Code only show turns they started, so `lacp` keeps a turn open until the
+  background subagents it started have reported back, and their report appears in it. Meanwhile the client shows
+  the turn as working; stopping it ends the wait (the subagent carries on, but its report is then not shown in T3).
+  Letta's silent subagents (reflection, memory), background shell commands and subagents started before the prompt
+  do not hold a turn open. Letta's `<task-notification>` messages are not shown as if you had typed them.
 - MCP servers the editor offers in `session/new` (for example T3 Code's per-session server) are connected by
   `lacp`, over stdio or Streamable HTTP, and their tools are registered with the Letta runtime as external tools
   named `mcp__<server>__<tool>`. Letta Code runs them like its own tools (with its approval rules), and `lacp`

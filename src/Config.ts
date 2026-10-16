@@ -53,6 +53,14 @@ export interface LacpConfigShape {
   /** How long a cancelled turn waits for Letta to report its end before lacp ends it. */
   readonly cancelGrace: Duration.Duration
   /**
+   * Keep a turn open while background subagents it started are still running,
+   * so their results, which Letta delivers in a follow-up turn, appear in it.
+   * Clients such as T3 Code do not show a turn the agent starts on its own.
+   */
+  readonly waitForBackground: boolean
+  /** How long a turn whose background work finished waits for the follow-up turn to start. */
+  readonly backgroundGrace: Duration.Duration
+  /**
    * ACP v2: send each prompt back to the client as a `user_message`. Off by
    * default: T3 Code renders the echo as a second message, including the
    * instructions it adds to prompts.
@@ -73,6 +81,8 @@ export class LacpConfig extends Context.Service<LacpConfig, LacpConfigShape>()("
     appServerUrl: Option.none(),
     maxAcpVersion: 2,
     cancelGrace: Duration.seconds(15),
+    waitForBackground: true,
+    backgroundGrace: Duration.seconds(20),
     echoPrompts: false,
     startupTimeout: Duration.seconds(60)
   }

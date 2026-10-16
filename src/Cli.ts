@@ -102,6 +102,14 @@ const flags = {
     Flag.withFallbackConfig(Config.Boolean("LACP_ECHO_PROMPTS")),
     Flag.withDefault(false)
   ),
+  waitForBackground: Flag.Boolean("wait-for-background").pipe(
+    Flag.withDescription(
+      "Keep a turn open until background subagents it started report back (--no-wait-for-background to end it " +
+        "right away). Env: LACP_WAIT_FOR_BACKGROUND"
+    ),
+    Flag.withFallbackConfig(Config.Boolean("LACP_WAIT_FOR_BACKGROUND")),
+    Flag.withDefault(true)
+  ),
   startupTimeout: Flag.Int("startup-timeout").pipe(
     Flag.withDescription("Seconds to wait for the Letta Code App Server to start. Env: LACP_STARTUP_TIMEOUT"),
     Flag.withFallbackConfig(Config.Int("LACP_STARTUP_TIMEOUT")),
@@ -119,6 +127,7 @@ type Flags = {
   readonly appServerUrl: Option.Option<string>
   readonly acpVersion: "1" | "2"
   readonly echoPrompts: boolean
+  readonly waitForBackground: boolean
   readonly startupTimeout: number
 }
 
@@ -142,6 +151,8 @@ const configLayer = (input: Flags) =>
         appServerUrl: input.appServerUrl,
         maxAcpVersion: input.acpVersion === "1" ? 1 : 2,
         cancelGrace: LacpConfig.defaults.cancelGrace,
+        waitForBackground: input.waitForBackground,
+        backgroundGrace: LacpConfig.defaults.backgroundGrace,
         echoPrompts: input.echoPrompts,
         startupTimeout: Duration.seconds(input.startupTimeout)
       }

@@ -57,6 +57,11 @@ src/
    - `stream_delta` → `Translator` → events (message/thought chunks, tool-call upserts, terminals, plans, usage);
    - `control_request` → a permission request to the client, answered back as an `approval_response`;
    - `turn_finished` → remaining tool calls are closed, `State(idle, stopReason)` is emitted and the turn resolves.
+     If the turn started background subagents that are still running (`update_subagent_state`, not silent) or a
+     `task_notification` is queued (`update_queue`), the result is held instead: the subagent's report comes in a
+     follow-up turn Letta runs on its own, which streams into the still-open turn, and that turn's end resolves it
+     (or the held result stands if no follow-up starts within a grace period). Cancelling a held turn ends it at
+     once. This is for clients that do not show turns the agent starts on its own, such as T3 Code.
 4. `AcpClient` projects each event onto the negotiated version (`ProjectV1` / `ProjectV2`) and sends
    `session/update` notifications in order, always before the v1 prompt response.
 
