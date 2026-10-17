@@ -19,6 +19,7 @@ import type {
   PermissionRequest,
   PlanEntry,
   SessionEvent,
+  StopReason,
   ToolCallPatch,
   ToolContent
 } from "../domain/Events.ts"
@@ -42,8 +43,28 @@ import {
 } from "./Protocol.ts"
 import * as Tools from "./Tools.ts"
 
+/** Letta stop reasons onto ACP stop reasons; any other is an error. */
+export const stopReasonOf = (reason: string): StopReason => {
+  switch (reason) {
+    case "end_turn":
+    case "no_tool_call":
+    case "tool_rule":
+    case "requires_approval":
+      return "end_turn"
+    case "cancelled":
+      return "cancelled"
+    case "max_steps":
+      return "max_turn_requests"
+    case "max_tokens_exceeded":
+    case "context_window_overflow_in_system_prompt":
+      return "max_tokens"
+    default:
+      return "error"
+  }
+}
+
 export interface TranslatorContext {
-  readonly cwd: () => string
+  readonly cwd: string
   readonly path: Path.Path
   /** The model's context window, for usage updates. */
   readonly contextWindow: () => Option.Option<number>
@@ -188,7 +209,7 @@ export const make = (context: TranslatorContext): Translator => {
     return state
   }
 
-  const toolContext = (): Tools.ToolContext => ({ cwd: context.cwd(), path: context.path })
+  const toolContext = (): Tools.ToolContext => ({ cwd: context.cwd, path: context.path })
 
   const presentation = (state: ToolState): Tools.Presentation =>
     Option.match(context.externalTool?.(state.name) ?? Option.none(), {

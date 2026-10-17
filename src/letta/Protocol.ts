@@ -189,7 +189,9 @@ export const CommandJson = Schema.fromJsonString(Command)
 export const FrameHeader = Schema.Struct({
   type: Schema.String,
   request_id: opt(Schema.String),
-  runtime: opt(RuntimeScope)
+  runtime: opt(RuntimeScope),
+  /** Frames like `control_request` may carry the conversation at the top level instead. */
+  conversation_id: opt(Schema.String)
 })
 export type FrameHeader = typeof FrameHeader.Type
 
@@ -440,6 +442,19 @@ export const StreamDelta = Schema.Struct({
   subagent_id: optNull(Schema.String)
 })
 export type StreamDelta = typeof StreamDelta.Type
+
+/** The frames lacp handles for a runtime, told apart by `type`. */
+export const RuntimeFrame = Schema.Union([
+  StreamDelta,
+  TurnFinished,
+  ControlRequest,
+  LoopStatus,
+  DeviceStatus,
+  ExternalToolCallRequest,
+  SubagentState,
+  QueueUpdate
+])
+export type RuntimeFrame = typeof RuntimeFrame.Type
 
 // --- stream_delta payloads (`delta.message_type`) ---
 

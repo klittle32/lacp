@@ -5,7 +5,7 @@ import * as Translator from "../src/letta/Translator.ts"
 
 const make = Effect.gen(function*() {
   const path = yield* Path.Path
-  return Translator.make({ cwd: () => "/work", path, contextWindow: () => Option.some(100_000) })
+  return Translator.make({ cwd: "/work", path, contextWindow: () => Option.some(100_000) })
 }).pipe(Effect.provide(NodeServices.layer))
 
 const events = (items: ReadonlyArray<Translator.TranslatedEvent>) =>
