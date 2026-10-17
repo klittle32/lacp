@@ -6,19 +6,13 @@
 import { assert, describe, it } from "@effect/vitest"
 import { Duration, Effect, Fiber } from "effect"
 import type { LacpConfigShape } from "../src/Config.ts"
-import { initializeHybrid, initializeV1, start } from "./helpers/AcpClient.ts"
+import { idle, initializeV1, setupV2, start, text } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
 
-const text = (value: string) => [{ type: "text", text: value }]
 const backgroundGrace = Duration.millis(200)
 
 const v2 = (fake: Fake.FakeLetta, config: Partial<LacpConfigShape> = {}) =>
-  Effect.gen(function*() {
-    const client = yield* start(fake, { backgroundGrace, ...config })
-    yield* client.request("initialize", initializeHybrid)
-    const sessionId = (yield* client.request("session/new", { cwd: "/work" })).result.sessionId as string
-    return { client, sessionId }
-  })
+  setupV2(fake, { backgroundGrace, ...config })
 
 /** Sends a v2 prompt and returns the session's conversation, which the first prompt creates. */
 const send = (
@@ -69,8 +63,6 @@ const reportBack = (
     yield* say(fake, sessionId, `a-${run}`, reply, run)
     yield* fake.emit(Fake.turnFinished(sessionId, "end_turn", { run_id: run }))
   })
-
-const idle = (u: any) => u.sessionUpdate === "state_update" && u.state === "idle"
 
 describe("background work", () => {
   it.live("keeps the turn open until a background subagent reports back", () =>

@@ -6,18 +6,11 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
-import { Context, Effect, FileSystem, Layer, Option, Ref } from "effect"
+import { Context, Effect, FileSystem, Layer, Option } from "effect"
 import { SessionIds } from "../src/agent/SessionIds.ts"
 import { Host } from "../src/Host.ts"
-import { initializeHybrid, projectDir, start } from "./helpers/AcpClient.ts"
+import { initializeHybrid, isInput, projectDir, sent, start, text } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
-
-const text = (value: string) => [{ type: "text", text: value }]
-
-const isInput = (c: any) => c.type === "input" && c.payload.kind === "create_message"
-
-const sent = (fake: Fake.FakeLetta, type: string) =>
-  Ref.get(fake.commands).pipe(Effect.map((all) => all.filter((c) => c.type === type) as Array<any>))
 
 describe("lazy conversations", () => {
   it.live("opens a session without creating anything in Letta, and creates it with the first prompt", () =>

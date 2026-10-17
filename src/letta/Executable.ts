@@ -135,8 +135,9 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
       const run = (command: string, args: ReadonlyArray<string>, timeout: Duration.Input) =>
         spawner.string(
           ChildProcess.make(command, args, {
-            env: { DISABLE_AUTOUPDATER: "1", LETTA_CODE_TELEM: "0" },
-            extendEnv: true,
+            // The host's environment, not this process's: tests describe hosts without a `letta`.
+            env: { ...host.env, DISABLE_AUTOUPDATER: "1", LETTA_CODE_TELEM: "0" },
+            extendEnv: false,
             shell: needsShell(command),
             stdin: "ignore"
           }),

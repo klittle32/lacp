@@ -1,16 +1,8 @@
 import { assert, describe, it } from "@effect/vitest"
 import { Deferred, Effect, Fiber, Layer, Option, Ref } from "effect"
 import { LettaAppServer } from "../src/letta/AppServer.ts"
-import { initializeHybrid, initializeV1, projectDir, start, startWith } from "./helpers/AcpClient.ts"
+import { initializeHybrid, initializeV1, projectDir, sent, setupV2, start, startWith } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
-
-const setup = (fake: Fake.FakeLetta) =>
-  Effect.gen(function*() {
-    const client = yield* start(fake)
-    yield* client.request("initialize", initializeHybrid)
-    const created = yield* client.request("session/new", { cwd: "/work" })
-    return { client, sessionId: created.result.sessionId as string, created }
-  })
 
 /** `session/set_config_option` as T3 Code sends it (v2). */
 const set = (client: Effect.Success<ReturnType<typeof start>>, sessionId: string, configId: string, value: string) =>
@@ -21,10 +13,6 @@ const prompt = (client: Effect.Success<ReturnType<typeof start>>, sessionId: str
   client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] })
 
 const option = (options: ReadonlyArray<any>, id: string) => options.find((o) => o.configId === id || o.id === id)
-
-/** How many commands of `type` were sent to Letta. */
-const sent = (fake: Fake.FakeLetta, type: string) =>
-  Ref.get(fake.commands).pipe(Effect.map((all) => all.filter((c) => c.type === type).length))
 
 const updates = (fake: Fake.FakeLetta) =>
   Ref.get(fake.commands).pipe(
@@ -58,7 +46,7 @@ describe("effort", () => {
   it.live("sets effort through the model's preset, once the first prompt creates the conversation", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV2(fake)
       const reply = yield* set(client, sessionId, "reasoning_effort", "high")
       assert.strictEqual(option(reply.result.configOptions, "reasoning_effort").currentValue, "high")
       // Nothing is sent to Letta before the session has a conversation.
@@ -73,7 +61,7 @@ describe("effort", () => {
   it.live("keeps the effort when switching to a model that sets it with `letta model set`", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV2(fake)
       yield* prompt(client, sessionId)
       const conversation = yield* fake.conversation
       yield* set(client, sessionId, "reasoning_effort", "high")
@@ -94,7 +82,7 @@ describe("effort", () => {
   it.live("applies a model and effort chosen before the first prompt to the new conversation", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV2(fake)
       yield* set(client, sessionId, "model", Fake.BYOK_MODEL)
       const reply = yield* set(client, sessionId, "reasoning_effort", "minimal")
       assert.strictEqual(option(reply.result.configOptions, "reasoning_effort").currentValue, "minimal")
@@ -121,9 +109,9 @@ describe("effort", () => {
       assert.strictEqual(option(options, "model").currentValue, Fake.MODEL)
       assert.strictEqual(option(options, "reasoning_effort").currentValue, "medium")
       yield* set(client, sessionId, "reasoning_effort", "high")
-      assert.strictEqual(yield* sent(fake, "create_agent"), 0)
+      assert.strictEqual((yield* sent(fake, "create_agent")).length, 0)
       yield* prompt(client, sessionId)
-      assert.strictEqual(yield* sent(fake, "create_agent"), 1)
+      assert.strictEqual((yield* sent(fake, "create_agent")).length, 1)
       assert.deepStrictEqual(yield* updates(fake), [{ model_id: "sonnet-high", model_handle: Fake.MODEL }])
     }))
 
@@ -178,7 +166,7 @@ describe("effort", () => {
           }
         ]
       }))
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV2(fake)
       yield* prompt(client, sessionId)
       const conversation = yield* fake.conversation
       yield* set(client, sessionId, "model", "lc-xai/grok-4.7")
@@ -195,7 +183,7 @@ describe("effort", () => {
   it.live("accepts the earlier `effort` id", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV2(fake)
       const reply = yield* set(client, sessionId, "effort", "high")
       assert.strictEqual(option(reply.result.configOptions, "reasoning_effort").currentValue, "high")
     }))
@@ -203,7 +191,7 @@ describe("effort", () => {
   it.live("offers T3 Code every model's levels, since it shows them for all models", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { created } = yield* setup(fake)
+      const { created } = yield* setupV2(fake)
       const effort = option(created.result.configOptions, "reasoning_effort")
       assert.deepStrictEqual(effort.options.map((o: any) => o.value), ["minimal", "low", "medium", "high"])
       assert.strictEqual(effort.currentValue, "medium")
@@ -212,7 +200,7 @@ describe("effort", () => {
   it.live("sets the closest level the model supports, and rejects unknown levels", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV2(fake)
       const max = yield* set(client, sessionId, "reasoning_effort", "max")
       assert.strictEqual(option(max.result.configOptions, "reasoning_effort").currentValue, "high")
       const minimal = yield* set(client, sessionId, "reasoning_effort", "minimal")
@@ -279,7 +267,7 @@ describe("effort", () => {
         client.request("session/new", { cwd: "/work" })
       ], { concurrency: "unbounded" }).pipe(Effect.forkChild)
       // Both sessions are reading their agent while the models are being listed.
-      while ((yield* sent(fake, "agent_retrieve")) < 2 || (yield* sent(fake, "list_models")) < 1) {
+      while ((yield* sent(fake, "agent_retrieve")).length < 2 || (yield* sent(fake, "list_models")).length < 1) {
         yield* Effect.sleep("5 millis")
       }
       yield* Effect.sleep("20 millis")
@@ -287,7 +275,7 @@ describe("effort", () => {
       const [first, second] = yield* Fiber.join(opening)
       assert.isDefined(option(first.result.configOptions, "reasoning_effort"))
       assert.isDefined(option(second.result.configOptions, "reasoning_effort"))
-      assert.strictEqual(yield* sent(fake, "list_models"), 1)
+      assert.strictEqual((yield* sent(fake, "list_models")).length, 1)
       assert.deepStrictEqual(yield* Ref.get(fake.cliCalls), [["model", "list"]])
     }))
 
@@ -314,6 +302,6 @@ describe("effort", () => {
       yield* Ref.set(current, { ...fake.connection, generation: 2 })
       const after = yield* client.request("session/new", { cwd: "/work" })
       assert.strictEqual(option(after.result.configOptions, "model").options.length, 3)
-      assert.strictEqual(yield* sent(fake, "list_models"), 2)
+      assert.strictEqual((yield* sent(fake, "list_models")).length, 2)
     }))
 })

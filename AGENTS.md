@@ -44,4 +44,3 @@ Run `npm run check && npm run lint && npm test` before committing.
 - Letta App Server protocol knowledge lives in `src/letta/`. Decode leniently: Letta Code ships often.
 - Tests use `@effect/vitest` (`it.effect`, `it.live`). Prefer driving behaviour through `test/helpers/FakeLetta.ts`
   and `test/helpers/AcpClient.ts` over mocking internals.
-- `src/Version.ts` must match `package.json` (a test checks it).

@@ -5,12 +5,8 @@
  */
 import { assert, describe, it } from "@effect/vitest"
 import { Duration, Effect, Fiber, Ref } from "effect"
-import { initializeHybrid, initializeV1, start } from "./helpers/AcpClient.ts"
+import { idle, initializeHybrid, initializeV1, isInput, start, text } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
-
-const text = (value: string) => [{ type: "text", text: value }]
-
-const isInput = (c: any) => c.type === "input" && c.payload.kind === "create_message"
 
 const inputs = (fake: Fake.FakeLetta) => Ref.get(fake.commands).pipe(Effect.map((all) => all.filter(isInput)))
 
@@ -89,7 +85,7 @@ describe("turns", () => {
       yield* fake.waitFor(isInput)
       const conversation = yield* fake.conversation
       yield* client.notify("session/cancel", { sessionId })
-      const ended = yield* client.update((u) => u.sessionUpdate === "state_update" && u.state === "idle").pipe(
+      const ended = yield* client.update(idle).pipe(
         Effect.timeout("1 second")
       )
       assert.strictEqual(ended.stopReason, "cancelled")
@@ -97,7 +93,7 @@ describe("turns", () => {
       // Letta ends the aborted turn once its silent model request settles; lacp never saw that run.
       yield* fake.emit(Fake.turnFinished(conversation, "cancelled", { run_id: "run-unseen" }))
       yield* Effect.sleep("50 millis")
-      const idles = (yield* client.updates).filter((u) => u.sessionUpdate === "state_update" && u.state === "idle")
+      const idles = (yield* client.updates).filter(idle)
       assert.strictEqual(idles.length, 1)
     }))
 

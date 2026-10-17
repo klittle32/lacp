@@ -180,3 +180,34 @@ export const initializeHybrid = {
   clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
   clientInfo: { name: "t3-code", version: "0.0.0" }
 }
+
+/** A prompt of one text block. */
+export const text = (value: string) => [{ type: "text", text: value }]
+
+/** A command Letta received that submits a prompt. */
+export const isInput = (c: any) => c.type === "input" && c.payload.kind === "create_message"
+
+/** The `state_update` that ends a turn. */
+export const idle = (u: any) => u.sessionUpdate === "state_update" && u.state === "idle"
+
+/** The commands of `type` sent to Letta so far. */
+export const sent = (fake: FakeLetta, type: string) =>
+  Ref.get(fake.commands).pipe(Effect.map((all) => all.filter((c) => c.type === type) as Array<any>))
+
+/** A started server with a v1 client and one new session. */
+export const setupV1 = (fake: FakeLetta, config: Partial<LacpConfigShape> = {}) =>
+  Effect.gen(function*() {
+    const client = yield* start(fake, config)
+    yield* client.request("initialize", initializeV1)
+    const created = yield* client.request("session/new", { cwd: "/work", mcpServers: [] })
+    return { client, sessionId: created.result.sessionId as string, created }
+  })
+
+/** A started server with a v2 (T3 Code) client and one new session. */
+export const setupV2 = (fake: FakeLetta, config: Partial<LacpConfigShape> = {}) =>
+  Effect.gen(function*() {
+    const client = yield* start(fake, config)
+    yield* client.request("initialize", initializeHybrid)
+    const created = yield* client.request("session/new", { cwd: "/work" })
+    return { client, sessionId: created.result.sessionId as string, created }
+  })

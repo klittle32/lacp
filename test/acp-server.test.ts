@@ -1,11 +1,7 @@
 import { assert, describe, it } from "@effect/vitest"
 import { Effect, Fiber, Option, Ref } from "effect"
-import { initializeHybrid, initializeV1, start } from "./helpers/AcpClient.ts"
+import { initializeHybrid, initializeV1, isInput, setupV1, setupV2, start, text } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
-
-const text = (value: string) => [{ type: "text", text: value }]
-
-const isInput = (c: any) => c.type === "input" && c.payload.kind === "create_message"
 
 describe("initialize", () => {
   it.live("negotiates v1 with a v1 client", () =>
@@ -75,18 +71,10 @@ describe("initialize", () => {
 })
 
 describe("ACP v1 sessions", () => {
-  const setup = (fake: Fake.FakeLetta) =>
-    Effect.gen(function*() {
-      const client = yield* start(fake)
-      yield* client.request("initialize", initializeV1)
-      const created = yield* client.request("session/new", { cwd: "/work", mcpServers: [] })
-      return { client, sessionId: created.result.sessionId as string, created }
-    })
-
   it.live("creates a session with modes, config options and commands", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, created, sessionId } = yield* setup(fake)
+      const { client, created, sessionId } = yield* setupV1(fake)
       assert.match(sessionId, /^lacp-[0-9a-f-]{36}$/)
       assert.strictEqual(created.result.modes.currentModeId, "unrestricted")
       const [model, effort, mode] = created.result.configOptions
@@ -118,7 +106,7 @@ describe("ACP v1 sessions", () => {
   it.live("streams a turn and resolves session/prompt with the stop reason", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV1(fake)
       const prompt = yield* client.request("session/prompt", { sessionId, prompt: text("hello") }).pipe(
         Effect.forkChild
       )
@@ -161,7 +149,7 @@ describe("ACP v1 sessions", () => {
   it.live("reports a failed turn as a JSON-RPC error", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV1(fake)
       const prompt = yield* client.request("session/prompt", { sessionId, prompt: text("hi") }).pipe(Effect.forkChild)
       yield* fake.waitFor(isInput)
       const conversation = yield* fake.conversation
@@ -173,7 +161,7 @@ describe("ACP v1 sessions", () => {
   it.live("cancels a turn: aborts in Letta and resolves with `cancelled`", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV1(fake)
       const prompt = yield* client.request("session/prompt", { sessionId, prompt: text("long task") }).pipe(
         Effect.forkChild
       )
@@ -195,7 +183,7 @@ describe("ACP v1 sessions", () => {
   it.live("asks for permission and forwards the decision to Letta", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV1(fake)
       const prompt = yield* client.request("session/prompt", { sessionId, prompt: text("edit it") }).pipe(
         Effect.forkChild
       )
@@ -254,7 +242,7 @@ describe("ACP v1 sessions", () => {
   it.live("maps allow-always and reject decisions", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV1(fake)
       yield* client.request("session/prompt", { sessionId, prompt: text("test it") }).pipe(Effect.forkChild)
       yield* fake.waitFor(isInput)
       const conversation = yield* fake.conversation
@@ -289,7 +277,7 @@ describe("ACP v1 sessions", () => {
   it.live("switches mode and model through config options", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV1(fake)
       // A prompt starts the conversation, so the changes reach Letta as they are made.
       yield* client.request("session/prompt", { sessionId, prompt: text("hello") }).pipe(Effect.forkChild)
       yield* fake.waitFor(isInput)
@@ -315,7 +303,7 @@ describe("ACP v1 sessions", () => {
   it.live("runs Letta slash commands typed into the prompt", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV1(fake)
       yield* client.update((u) => u.sessionUpdate === "available_commands_update")
       const reply = yield* client.request("session/prompt", { sessionId, prompt: text("/compact now") })
       assert.deepStrictEqual(reply.result, { stopReason: "end_turn" })
@@ -408,7 +396,7 @@ describe("ACP v1 sessions", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       yield* fake.on("input", () => ({ success: true, accepted: true, disposition: "queued" }))
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV1(fake)
       const prompt = yield* client.request("session/prompt", { sessionId, prompt: text("next") }).pipe(Effect.forkChild)
       const input = (yield* fake.waitFor(isInput)) as any
       const conversation = yield* fake.conversation
@@ -430,17 +418,9 @@ describe("ACP v1 sessions", () => {
 })
 
 describe("ACP v2 sessions", () => {
-  const setup = (fake: Fake.FakeLetta) =>
-    Effect.gen(function*() {
-      const client = yield* start(fake)
-      yield* client.request("initialize", initializeHybrid)
-      const created = yield* client.request("session/new", { cwd: "/work" })
-      return { client, sessionId: created.result.sessionId as string, created }
-    })
-
   it.live("returns availableCommands and v2 config options from session/new", () =>
     Effect.gen(function*() {
-      const { created } = yield* setup(yield* Fake.make)
+      const { created } = yield* setupV2(yield* Fake.make)
       assert.deepStrictEqual(created.result.configOptions.map((o: any) => o.configId), [
         "model",
         "reasoning_effort",
@@ -455,7 +435,7 @@ describe("ACP v2 sessions", () => {
   it.live("answers session/prompt on insertion and ends the turn with state_update", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV2(fake)
       const reply = yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
       const conversation = yield* fake.conversation
       assert.isString(reply.result.messageId)
@@ -488,7 +468,7 @@ describe("ACP v2 sessions", () => {
   it.live("reports errors after insertion as idle with stopReason error", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV2(fake)
       yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
       const conversation = yield* fake.conversation
       yield* fake.emit(Fake.turnFinished(conversation, "insufficient_credits", { error: "Out of credits" }))
@@ -504,7 +484,7 @@ describe("ACP v2 sessions", () => {
   it.live("shows shell tools as agent-owned terminals and blocks on approval", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV2(fake)
       yield* client.request("session/prompt", { sessionId, prompt: text("test it") })
       const conversation = yield* fake.conversation
       yield* fake.emit({
@@ -551,7 +531,7 @@ describe("ACP v2 sessions", () => {
   it.live("emits plan_update from UpdatePlan", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const { client, sessionId } = yield* setup(fake)
+      const { client, sessionId } = yield* setupV2(fake)
       yield* client.request("session/prompt", { sessionId, prompt: text("plan it") })
       const conversation = yield* fake.conversation
       yield* fake.emit(Fake.delta(conversation, {
@@ -609,7 +589,7 @@ describe("ACP v2 sessions", () => {
 
   it.live("closes a session", () =>
     Effect.gen(function*() {
-      const { client, sessionId } = yield* setup(yield* Fake.make)
+      const { client, sessionId } = yield* setupV2(yield* Fake.make)
       assert.deepStrictEqual((yield* client.request("session/close", { sessionId })).result, {})
       assert.strictEqual(
         (yield* client.request("session/prompt", { sessionId, prompt: text("x") })).error?.code,

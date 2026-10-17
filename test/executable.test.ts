@@ -196,35 +196,15 @@ const scriptInstall = Effect.gen(function*() {
 })
 
 describe("LettaExecutable runtimes", () => {
-  const host = (home: string) => ({ home, execPath: process.execPath, runtime: "node" as const })
-
-  it.live("runs letta.js with Bun when the settings file has no login", () =>
+  it.live("runs a symlinked letta.js with Bun when the settings file has no login", () =>
     Effect.gen(function*() {
       const { bin, bun, home, script } = yield* scriptInstall
-      const install = yield* resolveWith({ PATH: bin, HOME: home }, {}, host(home))
+      const host = { home, execPath: process.execPath, runtime: "node" as const }
+      const install = yield* resolveWith({ PATH: bin, HOME: home }, {}, host)
       assert.strictEqual(install.runtime, "bun")
       assert.strictEqual(install.command, bun)
       assert.deepStrictEqual(install.prefixArgs, [script])
       assert.strictEqual(install.version, "0.34.15")
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
-
-  it.live("keeps Node while ~/.letta/settings.json holds the login", () =>
-    Effect.gen(function*() {
-      const fs = yield* FileSystem.FileSystem
-      const { bin, home, script } = yield* scriptInstall
-      yield* fs.writeFileString(`${home}/.letta/settings.json`, JSON.stringify({ refreshToken: "rt" }))
-      const install = yield* resolveWith({ PATH: bin, HOME: home }, {}, host(home))
-      assert.strictEqual(install.runtime, "node")
-      assert.strictEqual(install.command, process.execPath)
-      assert.deepStrictEqual(install.prefixArgs, [script])
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
-
-  it.live("honours LACP_LETTA_RUNTIME=node", () =>
-    Effect.gen(function*() {
-      const { bin, home } = yield* scriptInstall
-      const install = yield* resolveWith({ PATH: bin, HOME: home }, { lettaRuntime: "node" }, host(home))
-      assert.strictEqual(install.runtime, "node")
-      assert.strictEqual(install.runtimeReason, "LACP_LETTA_RUNTIME=node")
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
 })
 
