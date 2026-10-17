@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest"
-import { Effect, Option, Ref } from "effect"
+import { Deferred, Effect, Fiber, Layer, Option, Ref } from "effect"
 import { LettaAppServer } from "../src/letta/AppServer.ts"
 import { initializeHybrid, initializeV1, start, startWith } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
@@ -21,6 +21,10 @@ const prompt = (client: Effect.Success<ReturnType<typeof start>>, sessionId: str
   client.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "hello" }] })
 
 const option = (options: ReadonlyArray<any>, id: string) => options.find((o) => o.configId === id || o.id === id)
+
+/** How many commands of `type` were sent to Letta. */
+const sent = (fake: Fake.FakeLetta, type: string) =>
+  Ref.get(fake.commands).pipe(Effect.map((all) => all.filter((c) => c.type === type).length))
 
 const updates = (fake: Fake.FakeLetta) =>
   Ref.get(fake.commands).pipe(
@@ -150,5 +154,56 @@ describe("effort", () => {
       assert.isUndefined(option(first.result.configOptions, "effort"))
       const second = yield* client.request("session/new", { cwd: "/work" })
       assert.isDefined(option(second.result.configOptions, "effort"))
+    }))
+
+  it.live("lists the models once for sessions that open together", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const release = yield* Deferred.make<void>()
+      yield* fake.on("list_models", () =>
+        Deferred.await(release).pipe(Effect.as({ success: true, entries: Fake.MODEL_ENTRIES })))
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const opening = yield* Effect.all([
+        client.request("session/new", { cwd: "/work" }),
+        client.request("session/new", { cwd: "/work" })
+      ], { concurrency: "unbounded" }).pipe(Effect.forkChild)
+      // Both sessions are reading their agent while the models are being listed.
+      while ((yield* sent(fake, "agent_retrieve")) < 2 || (yield* sent(fake, "list_models")) < 1) {
+        yield* Effect.sleep("5 millis")
+      }
+      yield* Effect.sleep("20 millis")
+      yield* Deferred.succeed(release, undefined)
+      const [first, second] = yield* Fiber.join(opening)
+      assert.isDefined(option(first.result.configOptions, "effort"))
+      assert.isDefined(option(second.result.configOptions, "effort"))
+      assert.strictEqual(yield* sent(fake, "list_models"), 1)
+      assert.deepStrictEqual(yield* Ref.get(fake.cliCalls), [["model", "list"]])
+    }))
+
+  it.live("lists the models again on a restarted App Server", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const current = yield* Ref.make(fake.connection)
+      const client = yield* startWith(
+        Layer.succeed(
+          LettaAppServer,
+          LettaAppServer.of({ connection: Ref.get(current), warmup: Effect.void, cli: fake.cli })
+        ),
+        { config: { agentId: Option.some(Fake.AGENT_ID) }, host: { home: "/nonexistent-home", cwd: "/work" } }
+      )
+      yield* client.request("initialize", initializeHybrid)
+      const before = yield* client.request("session/new", { cwd: "/work" })
+      assert.strictEqual(option(before.result.configOptions, "model").options.length, 2)
+
+      // The restarted App Server offers one more model.
+      yield* fake.on("list_models", () => ({
+        success: true,
+        entries: [...Fake.MODEL_ENTRIES, { id: "openai/gpt-5-mini", handle: "openai/gpt-5-mini", label: "GPT-5 mini" }]
+      }))
+      yield* Ref.set(current, { ...fake.connection, generation: 2 })
+      const after = yield* client.request("session/new", { cwd: "/work" })
+      assert.strictEqual(option(after.result.configOptions, "model").options.length, 3)
+      assert.strictEqual(yield* sent(fake, "list_models"), 2)
     }))
 })

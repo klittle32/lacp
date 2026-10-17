@@ -9,14 +9,17 @@
  * that the v1 surface awaits and the v2 surface reports via `state_update`.
  */
 import {
+  Clock,
   Context,
   Deferred,
+  Duration,
   Effect,
   Equal,
   Exit,
   FiberHandle,
   FiberSet,
   Layer,
+  type LogLevel,
   Match,
   Option,
   Path,
@@ -244,7 +247,46 @@ export class Agent extends Context.Service<Agent, {
 
       // --- turns ------------------------------------------------------------
 
+      /**
+       * Logs a step of the session's turn, with the time since the turn began.
+       * The log never holds prompts or tool input.
+       */
+      const logTurn = (session: Session, message: string, level: LogLevel.Severity = "Debug") =>
+        Effect.gen(function*() {
+          const now = yield* Clock.currentTimeMillis
+          const turn = Option.getOrUndefined(session.turn)
+          yield* Effect.logWithLevel(level)(message).pipe(Effect.annotateLogs({
+            session: session.id,
+            ...(turn === undefined
+              ? {}
+              : { turn: turn.clientMessageId, elapsed: Duration.format(Duration.millis(now - turn.began)) })
+          }))
+        })
+
+      /** Logs the turn's first output, once Letta runs it (until then, output is earlier work's). */
+      const noteOutput = (session: Session) =>
+        Effect.suspend(() => {
+          const turn = Option.getOrUndefined(session.turn)
+          if (turn === undefined || turn.streamed || !Turn.started(turn)) return Effect.void
+          turn.streamed = true
+          return logTurn(session, "First output from Letta")
+        })
+
+      /** Letta started the turn (see Turn.start). */
+      const startTurn = (session: Session, turn: Turn.Turn) =>
+        Effect.suspend(() => {
+          const queued = turn.phase._tag === "Queued"
+          Turn.start(turn)
+          return queued ? logTurn(session, "Letta started the queued prompt") : Effect.void
+        })
+
       const completeTurn = Effect.fnUntraced(function*(session: Session, result: TurnResult) {
+        const ended = `${result.stopReason}${
+          Option.match(result.error, { onNone: () => "", onSome: (error) => ` (${error.message})` })
+        }`
+        yield* Option.isSome(session.turn)
+          ? logTurn(session, `The turn ended: ${ended}`, "Info")
+          : logTurn(session, `A turn Letta ran on its own ended: ${ended}`)
         yield* emitAll(
           session,
           session.translator.finishTurn(
@@ -298,7 +340,7 @@ export class Agent extends Context.Service<Agent, {
         // A cancelled turn ends now, whatever is still running in the background.
         if (stopReason !== "cancelled" && Option.isSome(turn) && awaitsBackground(session, turn.value)) {
           if (turn.value.phase._tag !== "Held") {
-            yield* Effect.logInfo(`Keeping the turn open until its background work in ${session.id} reports back`)
+            yield* logTurn(session, "Keeping the turn open until its background work reports back", "Info")
           }
           turn.value.phase = Turn.Phase.Held({ result, followUp: false })
           return
@@ -330,7 +372,12 @@ export class Agent extends Context.Service<Agent, {
           return Effect.sleep(config.backgroundGrace).pipe(
             Effect.andThen(Effect.suspend(() =>
               settled(session, turn) && turn.phase._tag === "Held"
-                ? completeTurn(session, turn.phase.result)
+                ? logTurn(
+                  session,
+                  `The background work is done and no follow-up turn started within ${
+                    Duration.format(config.backgroundGrace)
+                  }`
+                ).pipe(Effect.andThen(completeTurn(session, turn.phase.result)))
                 : Effect.void
             )),
             FiberHandle.run(session.grace),
@@ -357,17 +404,22 @@ export class Agent extends Context.Service<Agent, {
       const onControlRequest = Effect.fnUntraced(
         function*(session: Session, attachment: Attachment, frame: ControlRequest) {
           const { events, request } = session.translator.permission(frame.request)
+          const tool = frame.request.tool_name
           yield* emitAll(session, events)
           session.approvals += 1
           yield* setForeground(session, "requires_action")
+          yield* logTurn(session, `Waiting for the client to approve ${tool}`)
           yield* client.requestPermission(session.id, request).pipe(
-            Effect.flatMap((decision) =>
-              attachment.connection.send({
-                type: "input",
-                runtime: attachment.runtime,
-                payload: { kind: "approval_response", request_id: frame.request_id, decision: decide(decision) }
-              })
-            ),
+            Effect.flatMap((decision) => {
+              const answer = decide(decision)
+              return logTurn(session, `The client answered the approval for ${tool}: ${answer.behavior}`).pipe(
+                Effect.andThen(attachment.connection.send({
+                  type: "input",
+                  runtime: attachment.runtime,
+                  payload: { kind: "approval_response", request_id: frame.request_id, decision: answer }
+                }))
+              )
+            }),
             Effect.catch((error) => Effect.logWarning(`Could not answer a Letta approval: ${error.message}`)),
             Effect.ensuring(Effect.sync(() => {
               session.approvals = Math.max(0, session.approvals - 1)
@@ -389,8 +441,9 @@ export class Agent extends Context.Service<Agent, {
         // Output of a turn lacp already ended (a cancel Letta never confirmed) is dropped.
         if (Option.isSome(run) && session.abandonedRuns.has(run.value)) return
         if (Option.isSome(run) && Option.isSome(session.turn)) session.turn.value.runs.add(run.value)
-        if (Option.isSome(session.turn) && session.turn.value.phase._tag === "Held") {
+        if (Option.isSome(session.turn) && Turn.waitingForBackground(session.turn.value)) {
           session.turn.value.phase = Turn.Phase.Held({ ...session.turn.value.phase, followUp: true })
+          yield* logTurn(session, "The background work reported back; following Letta's follow-up turn")
         }
         for (const item of session.translator.delta(frame.delta)) {
           switch (item._tag) {
@@ -409,7 +462,7 @@ export class Agent extends Context.Service<Agent, {
                   Option.isSome(session.turn) &&
                   session.turn.value.clientMessageId === Option.getOrUndefined(item.otid)
                 ) {
-                  Turn.start(session.turn.value)
+                  yield* startTurn(session, session.turn.value)
                 }
                 continue
               }
@@ -441,6 +494,7 @@ export class Agent extends Context.Service<Agent, {
               }
               if (item.event._tag !== "Usage" && item.event._tag !== "Notice") {
                 yield* setForeground(session, "running")
+                yield* noteOutput(session)
               }
               yield* emit(session, item.event)
             }
@@ -526,7 +580,7 @@ export class Agent extends Context.Service<Agent, {
         if (Option.isNone(turn)) return
         for (const removed of frame.removed ?? []) {
           if (removed.client_message_id !== turn.value.clientMessageId) continue
-          if (removed.disposition === "dequeued") Turn.start(turn.value)
+          if (removed.disposition === "dequeued") yield* startTurn(session, turn.value)
           if (removed.disposition === "cancelled") {
             yield* completeTurn(session, { stopReason: "cancelled", error: Option.none() })
           }
@@ -643,7 +697,10 @@ export class Agent extends Context.Service<Agent, {
           runtime: started.runtime
         }
         session.attachment = Option.some(attachment)
-        yield* consume(session, attachment, started.subscription).pipe(Effect.forkIn(started.scope))
+        yield* consume(session, attachment, started.subscription).pipe(
+          Effect.annotateLogs("session", session.id),
+          Effect.forkIn(started.scope)
+        )
         yield* watch(session, attachment).pipe(Effect.forkIn(started.scope))
         return attachment
       })
@@ -1070,7 +1127,9 @@ export class Agent extends Context.Service<Agent, {
           runs: new Set(),
           preexisting: new Set(session.backgroundSubagents),
           phase: state.accepted ? Turn.Phase.Running() : Turn.Phase.Submitted({ started: false, early: Option.none() }),
-          error: Option.none()
+          error: Option.none(),
+          began: yield* Clock.currentTimeMillis,
+          streamed: false
         }
         session.turn = Option.some(turn)
         return turn
@@ -1098,6 +1157,7 @@ export class Agent extends Context.Service<Agent, {
         const turn = yield* beginTurn(session, { accepted: true })
         const messageId = turn.clientMessageId
         session.localCommand = true
+        yield* logTurn(session, `Running the /${command.name} command`)
         yield* emit(session, { _tag: "UserMessage", messageId, content: prompt })
         yield* setForeground(session, "running")
         const handle = yield* handleOf(session, turn, release)
@@ -1163,14 +1223,22 @@ export class Agent extends Context.Service<Agent, {
             { timeout: "60 seconds" }
           ).pipe(
             Effect.mapError((error) => new PromptRejected({ message: error.message })),
-            Effect.tapError(() => withdraw)
+            Effect.tapError((error) =>
+              logTurn(session, `Letta did not take the prompt: ${error.message}`, "Info").pipe(Effect.andThen(withdraw))
+            )
           )
           if (!accepted.accepted) {
+            const message = accepted.error ?? "Letta Code did not accept the prompt"
+            yield* logTurn(session, `Letta did not take the prompt: ${message}`, "Info")
             yield* withdraw
-            return yield* new PromptRejected({ message: accepted.error ?? "Letta Code did not accept the prompt" })
+            return yield* new PromptRejected({ message })
           }
           const early = turn.phase._tag === "Submitted" ? turn.phase.early : Option.none()
           Turn.accept(turn, accepted.disposition === "queued")
+          yield* logTurn(
+            session,
+            turn.phase._tag === "Queued" ? "Letta queued the prompt behind earlier work" : "Letta accepted the prompt"
+          )
           yield* emit(session, { _tag: "UserMessage", messageId: clientMessageId, content: blocks })
           yield* setForeground(session, "running")
           // With nothing ahead of it in Letta's queue, an early turn_finished can only be ours.
@@ -1189,13 +1257,16 @@ export class Agent extends Context.Service<Agent, {
           return
         }
         /** Ends the turn without waiting for Letta to report its end, dropping the turn's late output. */
-        const abandon = Effect.suspend(() =>
-          Option.isSome(session.turn) && session.turn.value === turn
-            ? Effect.sync(() => turn.runs.forEach((run) => session.abandonedRuns.add(run))).pipe(
-              Effect.andThen(completeTurn(session, { stopReason: "cancelled", error: Option.none() }))
-            )
-            : Effect.void
-        )
+        const abandon = (reason: string) =>
+          Effect.suspend(() =>
+            Option.isSome(session.turn) && session.turn.value === turn
+              ? logTurn(session, reason).pipe(
+                Effect.andThen(Effect.sync(() => turn.runs.forEach((run) => session.abandonedRuns.add(run)))),
+                Effect.andThen(completeTurn(session, { stopReason: "cancelled", error: Option.none() }))
+              )
+              : Effect.void
+          )
+        yield* logTurn(session, "Cancelling the turn")
         const attachment = session.attachment
         if (Option.isSome(attachment)) {
           yield* attachment.value.connection.call(
@@ -1205,13 +1276,21 @@ export class Agent extends Context.Service<Agent, {
           ).pipe(
             // Letta reports the end of an aborted turn only once the model request settles,
             // which can take as long as the model stays silent; its acknowledgement is enough.
-            Effect.flatMap((response) => response.aborted === true ? abandon : Effect.void),
+            Effect.flatMap((response) =>
+              response.aborted === true ? abandon("Letta acknowledged the cancellation") : Effect.void
+            ),
             Effect.catch((error) => Effect.logWarning(`Letta did not acknowledge the cancellation: ${error.message}`)),
+            Effect.annotateLogs("session", session.id),
             Effect.forkIn(session.scope)
           )
         }
         // If Letta never reports the end of the turn, end it ourselves.
-        yield* Effect.sleep(config.cancelGrace).pipe(Effect.andThen(abandon), Effect.forkIn(session.scope))
+        yield* Effect.sleep(config.cancelGrace).pipe(
+          Effect.andThen(abandon(
+            `Letta did not end the cancelled turn within ${Duration.format(config.cancelGrace)}; ending it`
+          )),
+          Effect.forkIn(session.scope)
+        )
       })
 
       const setConfigOption = Effect.fn("Agent.setConfigOption")(

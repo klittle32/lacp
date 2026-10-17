@@ -132,7 +132,9 @@ Open the Agent Panel, click **+**, and choose **Letta Code**. If Zed cannot find
 - Letta's notices (a retried model request, an error, an MCP server that did not start) show as rows in the
   turn's work log: T3 Code's ACP version has no notices of its own.
 - To see what `lacp` logs, add `LACP_LOG_FILE=~/lacp.log` (and `LACP_LOG_LEVEL=debug`, or `trace` for every
-  App Server frame): T3 Code does not keep an agent's stderr.
+  App Server frame): T3 Code does not keep an agent's stderr. Each turn's end is logged with its stop reason and
+  duration; at `debug`, so is every step in between (accepted, first output, approvals, background work,
+  cancellation), which shows where a slow turn waited.
 
 T3 Code nightly speaks the ACP v2 draft, so `lacp` negotiates v2 with it: turns end with `state_update`, shell
 commands appear as terminals, and edits arrive as git patches. Prompts are not echoed back (`LACP_ECHO_PROMPTS`):

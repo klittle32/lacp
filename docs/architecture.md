@@ -105,6 +105,11 @@ started once Letta dequeues or echoes it, so a `turn_finished` for the earlier w
 rules are the turn's phases in `src/agent/Turn.ts`: Submitted (sent, not yet acknowledged), Queued, Running, and
 Held (waiting for background work).
 
+Each turn's steps are logged (`logTurn` in `Agent.ts`) with the session, the turn (the id of the prompt's user
+message) and the time since the turn began: accepted or queued, first output, approval waits and answers, held for
+background work, cancellation, and the end with its stop reason. The end is logged at info, the steps at debug.
+Prompts and tool input are never logged.
+
 ## The Letta connection
 
 `LettaAppServer` owns one connection at a time. The first use resolves the host's `letta` (`LettaExecutable`).
