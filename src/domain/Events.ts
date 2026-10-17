@@ -87,7 +87,13 @@ export const ConfigOption = Schema.Struct({
   description: Schema.optionalKey(Schema.String),
   category: Schema.Literals(["mode", "model", "thought_level", "model_config"]),
   currentValue: Schema.String,
-  options: Schema.Array(SelectChoice)
+  /** The choices of the session's model; none means the option does not apply to it. */
+  options: Schema.Array(SelectChoice),
+  /**
+   * The choices of every model, for clients that show one session's options
+   * for all models (T3 Code).
+   */
+  everyModelOptions: Schema.optionalKey(Schema.Array(SelectChoice))
 })
 export type ConfigOption = typeof ConfigOption.Type
 

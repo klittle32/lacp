@@ -20,7 +20,7 @@ import * as Method from "../jsonrpc/Method.ts"
 import { JsonRpcPeer } from "../jsonrpc/Peer.ts"
 import { AGENT_NAME, AGENT_TITLE, VERSION } from "../Version.ts"
 import { Agent, type SessionSummary } from "./Agent.ts"
-import { AcpClient } from "./Client.ts"
+import { AcpClient, showsOptionsForEveryModel } from "./Client.ts"
 import type { AgentError } from "./Errors.ts"
 import { MODE_CONFIG_ID, MODEL_CONFIG_ID } from "./Settings.ts"
 
@@ -67,7 +67,7 @@ const LegacySetModel = Method.request(
 const v1Options = (options: ReadonlyArray<ConfigOption>) => {
   const modes = ProjectV1.modeState(options)
   return {
-    configOptions: options.map(ProjectV1.configOption),
+    configOptions: ProjectV1.configOptions(options),
     ...(modes === undefined ? {} : { modes })
   }
 }
@@ -151,7 +151,7 @@ export class AcpServer extends Context.Service<AcpServer, {
               RpcError.invalidParams({ configId: params.configId, reason: "boolean options are not supported" })
             )
             : rpc(agent.setConfigOption(params.sessionId, params.configId, params.value)).pipe(
-              Effect.map((options) => ({ configOptions: options.map(ProjectV1.configOption) }))
+              Effect.map((options) => ({ configOptions: ProjectV1.configOptions(options) }))
             )),
         Method.handle(V1.Prompt, ({ prompt, sessionId }) =>
           Effect.gen(function*() {
@@ -177,6 +177,9 @@ export class AcpServer extends Context.Service<AcpServer, {
           Effect.flatMap((state) => client.emit(sessionId, { _tag: "State", state }))
         )
 
+      /** Whether the v2 client shows one session's options for all models; set by `initialize`, before any session. */
+      let everyModel = false
+
       const v2 = Method.router([
         Method.handle(V2.Login, authenticate),
         Method.handle(
@@ -191,7 +194,7 @@ export class AcpServer extends Context.Service<AcpServer, {
             Effect.flatMap((mcpServers) => rpc(agent.newSession({ cwd: params.cwd, mcpServers }))),
             Effect.map((setup) => ({
               sessionId: setup.sessionId,
-              configOptions: setup.configOptions.map(ProjectV2.configOption),
+              configOptions: ProjectV2.configOptions(setup.configOptions, everyModel),
               availableCommands: commandsV2(setup.commands)
             }))
           )),
@@ -211,7 +214,7 @@ export class AcpServer extends Context.Service<AcpServer, {
             ),
             Effect.tap((setup) => snapshot(setup.sessionId)),
             Effect.map((setup) => ({
-              configOptions: setup.configOptions.map(ProjectV2.configOption),
+              configOptions: ProjectV2.configOptions(setup.configOptions, everyModel),
               availableCommands: commandsV2(setup.commands)
             }))
           )
@@ -222,7 +225,7 @@ export class AcpServer extends Context.Service<AcpServer, {
           params.type !== "id" || typeof params.value !== "string"
             ? Effect.fail(RpcError.invalidParams({ configId: params.configId, type: params.type }))
             : rpc(agent.setConfigOption(params.sessionId, params.configId, params.value)).pipe(
-              Effect.map((options) => ({ configOptions: options.map(ProjectV2.configOption) }))
+              Effect.map((options) => ({ configOptions: ProjectV2.configOptions(options, everyModel) }))
             )),
         Method.handle(V2.Prompt, ({ prompt, sessionId }) =>
           // Once inserted, a v2 prompt must not be answered with an error, so the
@@ -249,6 +252,7 @@ export class AcpServer extends Context.Service<AcpServer, {
         if (Option.isSome(v2Request)) {
           const capabilities = v2Request.value.capabilities ?? {}
           yield* client.select({ version: 2, capabilities, client: v2Request.value.info })
+          everyModel = showsOptionsForEveryModel(v2Request.value.info)
           yield* Ref.set(surface, Option.some(v2))
           yield* Effect.logInfo(`ACP v2 negotiated with ${v2Request.value.info.name} ${v2Request.value.info.version}`)
           yield* agent.warmup

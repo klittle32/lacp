@@ -26,6 +26,14 @@ export type Surface =
  */
 const presentsNotices = (client: Implementation) => client.name !== "t3-code"
 
+/**
+ * Whether a v2 client shows one session's config options for all models.
+ * T3 Code (as `t3-code` and the `t3-code-provider-*` connections it checks
+ * providers with) opens a session per provider and offers its options with
+ * every model in its picker, before a thread's own session exists.
+ */
+export const showsOptionsForEveryModel = (client: Implementation) => client.name.startsWith("t3-code")
+
 type Selected =
   | { readonly version: 1; readonly projector: ProjectV1.ProjectorV1 }
   | { readonly version: 2; readonly projector: ProjectV2.ProjectorV2 }
@@ -61,7 +69,8 @@ export class AcpClient extends Context.Service<AcpClient, {
               projector: ProjectV2.makeProjector({
                 echoPrompts: config.echoPrompts,
                 notices: presentsNotices(surface.client),
-                noticeIdPrefix: `notice-${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`
+                noticeIdPrefix: `notice-${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`,
+                everyModelOptions: showsOptionsForEveryModel(surface.client)
               })
             }
           yield* Ref.set(selected, Option.some(projector))

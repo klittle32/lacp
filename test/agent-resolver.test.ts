@@ -63,4 +63,41 @@ describe("AgentResolver", () => {
       assert.deepStrictEqual(yield* resolver.find(fake.connection, cwd), Option.some(Fake.AGENT_ID))
       assert.strictEqual(yield* created(fake), 1)
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
+  it.live("records a new agent in the project's settings, so later processes keep talking to it", () =>
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      const path = yield* Path.Path
+      const fake = yield* Fake.make
+      const { resolver, cwd } = yield* setup()
+      yield* writeSettings(cwd, "settings.local.json", { permissions: { allow: ["Read"] } })
+      assert.strictEqual(yield* resolver.findOrCreate(fake.connection, cwd), Fake.AGENT_ID)
+      const settings = JSON.parse(yield* fs.readFileString(path.join(cwd, ".letta", "settings.local.json")))
+      assert.deepStrictEqual(settings, { permissions: { allow: ["Read"] }, lastAgent: Fake.AGENT_ID })
+
+      // A later process on the same project finds it without creating another.
+      const later = yield* Layer.build(AgentResolver.layer.pipe(
+        Layer.provide(LacpConfig.layerTest({ agentId: Option.none() })),
+        Layer.provide(Host.layerTest({ home: yield* fs.makeTempDirectoryScoped(), cwd })),
+        Layer.provide(NodeServices.layer)
+      ))
+      assert.deepStrictEqual(
+        yield* Context.get(later, AgentResolver).find(fake.connection, cwd),
+        Option.some(Fake.AGENT_ID)
+      )
+      assert.strictEqual(yield* created(fake), 1)
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
+  it.live("leaves a project settings file that is not a JSON object alone", () =>
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      const path = yield* Path.Path
+      const fake = yield* Fake.make
+      const { resolver, cwd } = yield* setup()
+      const file = path.join(cwd, ".letta", "settings.local.json")
+      yield* fs.makeDirectory(path.join(cwd, ".letta"), { recursive: true })
+      yield* fs.writeFileString(file, "{ not json")
+      assert.strictEqual(yield* resolver.findOrCreate(fake.connection, cwd), Fake.AGENT_ID)
+      assert.strictEqual(yield* fs.readFileString(file), "{ not json")
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
 })

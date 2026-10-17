@@ -9,7 +9,7 @@ import { assert, describe, it } from "@effect/vitest"
 import { Context, Effect, FileSystem, Layer, Option, Ref } from "effect"
 import { SessionIds } from "../src/agent/SessionIds.ts"
 import { Host } from "../src/Host.ts"
-import { initializeHybrid, start } from "./helpers/AcpClient.ts"
+import { initializeHybrid, projectDir, start } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
 
 const text = (value: string) => [{ type: "text", text: value }]
@@ -23,14 +23,15 @@ describe("lazy conversations", () => {
   it.live("opens a session without creating anything in Letta, and creates it with the first prompt", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
+      const cwd = projectDir()
       // No agent is configured or known on this host, so the first prompt creates one too.
       const client = yield* start(fake, { agentId: Option.none() })
       yield* client.request("initialize", initializeHybrid)
       // T3 Code's provider check: open a session, read its settings, close it.
-      const probe = yield* client.request("session/new", { cwd: "/work" })
+      const probe = yield* client.request("session/new", { cwd })
       yield* client.request("session/close", { sessionId: probe.result.sessionId })
 
-      const created = yield* client.request("session/new", { cwd: "/work" })
+      const created = yield* client.request("session/new", { cwd })
       const sessionId = created.result.sessionId as string
       assert.match(sessionId, /^lacp-/)
       assert.notStrictEqual(sessionId, probe.result.sessionId)

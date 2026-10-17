@@ -208,6 +208,15 @@ export const make = Effect.gen(function*() {
           conversation: { id, agent_id: AGENT_ID, summary: "Earlier work", model_settings: settingsOf(id) }
         }
     },
+    conversation_update: (command) => {
+      const c = command as Extract<Command, { type: "conversation_update" }>
+      const modelSettings = c.body["model_settings"]
+      if (modelSettings !== undefined) settings.set(c.conversation_id, modelSettings as Record<string, unknown>)
+      return {
+        success: true,
+        conversation: { id: c.conversation_id, agent_id: AGENT_ID, model_settings: settingsOf(c.conversation_id) }
+      }
+    },
     conversation_messages_list: () => ({ success: true, messages: [], has_more: false, next_before: null }),
     conversation_list: () => ({
       success: true,

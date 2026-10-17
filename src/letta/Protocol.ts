@@ -155,6 +155,12 @@ export const Command = Schema.Union([
     conversation_id: Schema.String
   }),
   Schema.Struct({
+    type: Schema.Literal("conversation_update"),
+    request_id: Schema.String,
+    conversation_id: Schema.String,
+    body: Schema.Record(Schema.String, Schema.Unknown)
+  }),
+  Schema.Struct({
     type: Schema.Literal("conversation_messages_list"),
     request_id: Schema.String,
     conversation_id: Schema.String,
@@ -285,6 +291,13 @@ export const UpdateModelResponse = response({
 
 export const ConversationListResponse = response({ conversations: Schema.Array(Conversation) })
 export const ConversationRetrieveResponse = response({ conversation: Schema.NullOr(Conversation) })
+
+/** A conversation's model settings as Letta stores them, every key kept, to send back with one changed. */
+export const ConversationModelSettingsResponse = response({
+  conversation: Schema.NullOr(Schema.Struct({ model_settings: optNull(Schema.Record(Schema.String, Schema.Unknown)) }))
+})
+
+export const ConversationUpdateResponse = response({ conversation: optNull(Conversation) })
 
 export const ConversationMessagesListResponse = response({
   messages: Schema.Array(Schema.Unknown),

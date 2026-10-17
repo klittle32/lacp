@@ -25,7 +25,7 @@ type Updates = ReadonlyArray<V1.SessionUpdate>
 
 const status = (s: ToolStatus): V1.ToolCallStatus => (s === "cancelled" ? "failed" : s)
 
-export const configOption = (option: ConfigOption): V1.SessionConfigOption => ({
+const configOption = (option: ConfigOption): V1.SessionConfigOption => ({
   type: "select",
   id: option.id,
   name: option.name,
@@ -38,6 +38,10 @@ export const configOption = (option: ConfigOption): V1.SessionConfigOption => ({
     ...(o.description === undefined ? {} : { description: o.description })
   }))
 })
+
+/** The config options that apply to the session (those with choices). */
+export const configOptions = (options: ReadonlyArray<ConfigOption>): Array<V1.SessionConfigOption> =>
+  options.filter((o) => o.options.length > 0).map(configOption)
 
 /** The legacy `modes` state, kept in sync with the `mode` config option. */
 export const modeState = (options: ReadonlyArray<ConfigOption>) => {
@@ -162,7 +166,7 @@ const makeTurnProjector = (features: ClientFeatures): TurnProjector => {
     }],
     ConfigOptions: (
       e
-    ): Updates => [{ sessionUpdate: "config_option_update", configOptions: e.options.map(configOption) }],
+    ): Updates => [{ sessionUpdate: "config_option_update", configOptions: configOptions(e.options) }],
     SessionInfo: (e): Updates => [{
       sessionUpdate: "session_info_update",
       ...(e.title === undefined ? {} : { title: e.title }),
