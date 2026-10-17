@@ -7,7 +7,7 @@
  * Effort is applied through the model's catalog preset where it has one, and
  * with `letta model set --reasoning` otherwise; the mode is device state.
  */
-import { Context, Effect, Equal, Layer, Match, Option, Schema } from "effect"
+import { Cache, Context, Duration, Effect, Equal, Exit, Layer, Match, Option, Schema } from "effect"
 import { LacpConfig } from "../Config.ts"
 import type { ConfigOption } from "../domain/Events.ts"
 import { LettaAppServer, type LettaConnection } from "../letta/AppServer.ts"
@@ -141,7 +141,7 @@ export interface Target {
 }
 
 export class Settings extends Context.Service<Settings, {
-  /** The model choices of an App Server, cached per generation once listing them succeeded. */
+  /** The model choices of an App Server connection, listed once per connection (a failed listing is retried). */
   catalog(connection: LettaConnection): Effect.Effect<ReadonlyArray<Models.ModelChoice>>
   /** Applies a change to one of the config options. */
   set(
@@ -166,25 +166,17 @@ export class Settings extends Context.Service<Settings, {
     Effect.gen(function*() {
       const appServer = yield* LettaAppServer
       const config = yield* LacpConfig
-      const catalogs = new Map<number, ReadonlyArray<Models.ModelChoice>>()
 
       /**
        * `list_models`, with each model's effort levels from `letta model list`
        * (which also covers models without presets).
        */
-      const catalog = (connection: LettaConnection) =>
-        Effect.suspend(() => {
-          const cached = catalogs.get(connection.generation)
-          if (cached !== undefined) return Effect.succeed(cached)
-          const entries = connection.call((request_id) => ({ type: "list_models", request_id }), ListModelsResponse, {
+      const listModels = (connection: LettaConnection) =>
+        Effect.all([
+          connection.call((request_id) => ({ type: "list_models", request_id }), ListModelsResponse, {
             timeout: "15 seconds"
-          }).pipe(
-            Effect.map((response) => Option.some(response.entries)),
-            Effect.catch((error) =>
-              Effect.logWarning(`Could not list Letta models: ${error.message}`).pipe(Effect.as(Option.none()))
-            )
-          )
-          const levels = appServer.cli(["model", "list"]).pipe(
+          }),
+          appServer.cli(["model", "list"]).pipe(
             Effect.map((output) => Option.getOrElse(Models.decodeModelList(output), () => [])),
             Effect.catch((error) =>
               Effect.logDebug(`Effort levels from \`letta model list\` are unavailable: ${error.message}`).pipe(
@@ -192,15 +184,24 @@ export class Settings extends Context.Service<Settings, {
               )
             )
           )
-          return Effect.all([entries, levels], { concurrency: "unbounded" }).pipe(
-            Effect.map(([listed, rows]) => {
-              const choices = Models.catalog(Option.getOrElse(listed, () => []), rows)
-              // A failed listing is retried by the next session instead of being cached.
-              if (Option.isSome(listed)) catalogs.set(connection.generation, choices)
-              return choices
-            })
-          )
-        })
+        ], { concurrency: "unbounded" }).pipe(
+          Effect.map(([listed, rows]) => Models.catalog(listed.entries, rows)),
+          Effect.tapError((error) => Effect.logWarning(`Could not list Letta models: ${error.message}`))
+        )
+
+      // One listing per connection, shared by the sessions that open while it runs. A failed
+      // listing is dropped, so the next session tries again. A restarted App Server is a new
+      // connection, and only the latest two are kept.
+      const catalogs = yield* Cache.makeWith(listModels, {
+        capacity: 2,
+        timeToLive: (exit) => Exit.isSuccess(exit) ? Duration.infinity : Duration.zero
+      })
+
+      const catalog = (connection: LettaConnection) =>
+        // Connections are keyed by identity: comparing two structurally would walk their internals.
+        Cache.get(catalogs, Equal.byReferenceUnsafe(connection)).pipe(
+          Effect.orElseSucceed((): ReadonlyArray<Models.ModelChoice> => [])
+        )
 
       /** Records what Letta applied, as reported in model settings. */
       const record = (
