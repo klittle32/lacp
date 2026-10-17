@@ -26,7 +26,10 @@ import { type AgentUnavailable, configFailure, InvalidConfigValue, unavailable }
 
 export const MODE_CONFIG_ID = "mode"
 export const MODEL_CONFIG_ID = "model"
-export const EFFORT_CONFIG_ID = "effort"
+/** The id JetBrains Air (and Zed's own agent) use for reasoning effort; Air looks the option up by it. */
+export const EFFORT_CONFIG_ID = "reasoning_effort"
+/** The effort option's earlier id, which clients may still send for threads they saved. */
+const LEGACY_EFFORT_CONFIG_ID = "effort"
 
 const MODES: ReadonlyArray<{ readonly value: PermissionMode; readonly name: string; readonly description: string }> = [
   { value: "standard", name: "Standard", description: "Ask before running tools that change files or run commands" },
@@ -76,14 +79,23 @@ export const initialSettings = (
 const currentChoice = (settings: SessionSettings) =>
   Option.flatMap(settings.model, (handle) => Models.findChoice(settings.models, handle, settings.contextWindow))
 
+/**
+ * The model a session shows: its own, or, before Letta has recorded one (a
+ * session whose agent the first prompt creates), the first in the catalog.
+ */
+const shownChoice = (settings: SessionSettings) =>
+  Option.isSome(settings.model)
+    ? currentChoice(settings)
+    : Option.fromUndefinedOr(settings.models[0])
+
 /** Model, effort (when the model has levels to choose from) and mode, in that order. */
 export const configOptions = (settings: SessionSettings): ReadonlyArray<ConfigOption> => {
   const options: Array<ConfigOption> = []
-  const choice = currentChoice(settings)
+  const choice = shownChoice(settings)
   if (Option.isSome(settings.model) || settings.models.length > 0) {
     const current = Option.match(choice, {
       onSome: (c) => c.key,
-      onNone: () => Option.getOrElse(settings.model, () => settings.models[0]?.key ?? "")
+      onNone: () => Option.getOrElse(settings.model, () => "")
     })
     const choices = Models.modelChoices(settings.models)
     if (!choices.some((c) => c.value === current)) choices.unshift({ value: current, name: current })
@@ -124,7 +136,8 @@ const parseChange = (settings: SessionSettings, configId: string, value: string)
     case MODEL_CONFIG_ID:
       return Option.map(Models.choiceFor(settings.models, value), (choice) => ({ _tag: "Model", choice }))
     case EFFORT_CONFIG_ID:
-      return Option.all({ choice: currentChoice(settings), effort: Models.decodeEffort(value) }).pipe(
+    case LEGACY_EFFORT_CONFIG_ID:
+      return Option.all({ choice: shownChoice(settings), effort: Models.decodeEffort(value) }).pipe(
         Option.filter(({ choice, effort }) => choice.levels.includes(effort)),
         Option.map(({ choice, effort }) => ({ _tag: "Effort", choice, effort }))
       )

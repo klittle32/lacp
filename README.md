@@ -169,7 +169,8 @@ ACP client ──stdio, JSON-RPC (ACP v1 or v2)──▶ lacp ──WebSocket─
     providers, a ChatGPT subscription and the local backend, not just Letta's hosted models). It is applied
     through Letta's effort preset where the model has one, and with `letta model set --reasoning` otherwise.
     Switching models keeps the effort when the new model supports it. Clients show it as a `thought_level`
-    setting (T3 Code: the traits menu; Zed: a dropdown next to the model).
+    setting with id `reasoning_effort` (T3 Code: the traits menu; Zed: a dropdown next to the model). A session
+    whose agent the first prompt creates offers the levels of the model it shows until then.
   - Modes are Letta Code's permission modes.
 - Slash commands are the App Server's commands plus those contributed by your mods. Until a new session's first
   prompt starts its runtime, it offers Letta's built-in commands.

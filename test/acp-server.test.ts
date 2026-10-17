@@ -90,7 +90,7 @@ describe("ACP v1 sessions", () => {
       assert.match(sessionId, /^lacp-[0-9a-f-]{36}$/)
       assert.strictEqual(created.result.modes.currentModeId, "unrestricted")
       const [model, effort, mode] = created.result.configOptions
-      assert.strictEqual(effort.id, "effort")
+      assert.strictEqual(effort.id, "reasoning_effort")
       assert.strictEqual(mode.id, "mode")
       assert.strictEqual(mode.category, "mode")
       assert.strictEqual(model.id, "model")
@@ -441,7 +441,11 @@ describe("ACP v2 sessions", () => {
   it.live("returns availableCommands and v2 config options from session/new", () =>
     Effect.gen(function*() {
       const { created } = yield* setup(yield* Fake.make)
-      assert.deepStrictEqual(created.result.configOptions.map((o: any) => o.configId), ["model", "effort", "mode"])
+      assert.deepStrictEqual(created.result.configOptions.map((o: any) => o.configId), [
+        "model",
+        "reasoning_effort",
+        "mode"
+      ])
       assert.deepStrictEqual(created.result.availableCommands[1], {
         name: "compact",
         description: "Summarize the conversation to free up context"
@@ -583,7 +587,11 @@ describe("ACP v2 sessions", () => {
         cwd: "/work",
         replayFrom: { type: "start" }
       })
-      assert.deepStrictEqual(resumed.result.configOptions.map((o: any) => o.configId), ["model", "effort", "mode"])
+      assert.deepStrictEqual(resumed.result.configOptions.map((o: any) => o.configId), [
+        "model",
+        "reasoning_effort",
+        "mode"
+      ])
       const updates = yield* client.updates
       assert.deepStrictEqual(updates.slice(0, 2), [
         { sessionUpdate: "agent_message_chunk", messageId: "m1", content: { type: "text", text: "Earlier answer" } },
