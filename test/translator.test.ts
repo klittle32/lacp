@@ -1,5 +1,5 @@
 import { NodeServices } from "@effect/platform-node"
-import { assert, describe, it } from "@effect/vitest"
+import { assert, describe, expect, it } from "@effect/vitest"
 import { Effect, Option, Path } from "effect"
 import * as Translator from "../src/letta/Translator.ts"
 
@@ -156,12 +156,8 @@ describe("Translator", () => {
       })
       assert.strictEqual(request.title, "Write new.txt")
       assert.deepStrictEqual(request.options.map((o) => o.optionId), ["allow", "always:s", "reject"])
-      assert.deepStrictEqual(request.toolCall.content, [{
-        _tag: "Diff",
-        path: "/work/new.txt",
-        oldText: null,
-        newText: "x"
-      }])
+      // Letta sent no hunks for this file: `hunks` is `undefined`, which `toEqual` ignores.
+      expect(request.toolCall.content).toEqual([{ _tag: "Diff", path: "/work/new.txt", oldText: null, newText: "x" }])
     }))
 
   it.effect("strips system reminders and flags user echoes", () =>

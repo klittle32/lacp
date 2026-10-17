@@ -298,40 +298,39 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
             Effect.mapError((error) => new LettaDisconnected({ message: `Failed to send to Letta: ${error.message}` }))
           )
 
-        const call = <A extends Reply, I>(
+        const call = Effect.fnUntraced(function*<A extends Reply, I>(
           make: (requestId: string) => Command,
           response: Schema.Codec<A, I>,
           options?: CallOptions
-        ): Effect.Effect<A, LettaRequestFailed | LettaDisconnected> =>
-          Effect.gen(function*() {
-            const requestId = `lacp-${generation}-${nextId++}`
-            const command = make(requestId)
-            const waiter = yield* Deferred.make<unknown, LettaDisconnected>()
-            pending.set(requestId, waiter)
-            const raw = yield* send(command).pipe(
-              Effect.andThen(Deferred.await(waiter)),
-              Effect.timeoutOrElse({
-                duration: options?.timeout ?? DEFAULT_CALL_TIMEOUT,
-                orElse: () =>
-                  Effect.fail(
-                    new LettaRequestFailed({ command: command.type, message: "Letta did not respond in time" })
-                  )
-              }),
-              Effect.ensuring(Effect.sync(() => pending.delete(requestId)))
+        ): Effect.fn.Return<A, LettaRequestFailed | LettaDisconnected> {
+          const requestId = `lacp-${generation}-${nextId++}`
+          const command = make(requestId)
+          const waiter = yield* Deferred.make<unknown, LettaDisconnected>()
+          pending.set(requestId, waiter)
+          const raw = yield* send(command).pipe(
+            Effect.andThen(Deferred.await(waiter)),
+            Effect.timeoutOrElse({
+              duration: options?.timeout ?? DEFAULT_CALL_TIMEOUT,
+              orElse: () =>
+                Effect.fail(
+                  new LettaRequestFailed({ command: command.type, message: "Letta did not respond in time" })
+                )
+            }),
+            Effect.ensuring(Effect.sync(() => pending.delete(requestId)))
+          )
+          const decoded = yield* Schema.decodeUnknownEffect(response)(raw).pipe(
+            Effect.mapError((error) =>
+              new LettaRequestFailed({ command: command.type, message: `Unexpected response: ${error.message}` })
             )
-            const decoded = yield* Schema.decodeUnknownEffect(response)(raw).pipe(
-              Effect.mapError((error) =>
-                new LettaRequestFailed({ command: command.type, message: `Unexpected response: ${error.message}` })
-              )
-            )
-            if (decoded.success === false) {
-              return yield* new LettaRequestFailed({
-                command: command.type,
-                message: decoded.error ?? "Request failed"
-              })
-            }
-            return decoded
-          })
+          )
+          if (decoded.success === false) {
+            return yield* new LettaRequestFailed({
+              command: command.type,
+              message: decoded.error ?? "Request failed"
+            })
+          }
+          return decoded
+        })
 
         const info = yield* call((request_id) => ({ type: "app_server_info", request_id }), AppServerInfo, {
           timeout: "20 seconds"
@@ -368,8 +367,9 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
       }
       const state = yield* SynchronizedRef.make({ live: Option.none<Live>(), generation: 0 })
 
-      const connection = SynchronizedRef.modifyEffect(state, ({ live, generation }) =>
-        Effect.gen(function*() {
+      const connection = SynchronizedRef.modifyEffect(
+        state,
+        Effect.fnUntraced(function*({ live, generation }) {
           if (Option.isSome(live)) {
             if (yield* live.value.connection.isAlive) return [live.value.connection, { live, generation }] as const
             yield* Scope.close(live.value.scope, Exit.void)
@@ -380,7 +380,8 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
             Effect.onError(() => Scope.close(scope, Exit.void))
           )
           return [next, { live: Option.some({ connection: next, scope }), generation: next.generation }] as const
-        })).pipe(Effect.withSpan("LettaAppServer.connection"))
+        })
+      ).pipe(Effect.withSpan("LettaAppServer.connection"))
 
       const warmup = connection.pipe(
         Effect.tapError((error) => Effect.logWarning(`Letta Code is not ready yet: ${error.message}`)),

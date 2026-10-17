@@ -10,6 +10,7 @@ src/
 ├── Config.ts             LacpConfig (auth mode, agent, model, permission mode, ACP version, …)
 ├── Host.ts               the host process environment (env, platform, cwd, home) as a service
 ├── LogFile.ts            the optional log file (`LACP_LOG_FILE`), alongside stderr
+├── SchemaUtil.ts         `opt`/`optNull`: optional schema fields that may hold `undefined` (JSON drops them)
 ├── jsonrpc/              transport-agnostic JSON-RPC 2.0
 │   ├── JsonRpc.ts        wire schemas, error codes, RpcError
 │   ├── Method.ts         typed method descriptors, handlers, dispatchers

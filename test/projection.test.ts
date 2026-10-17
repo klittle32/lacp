@@ -1,7 +1,9 @@
-import { assert, describe, it } from "@effect/vitest"
+import { assert, describe, expect, it } from "@effect/vitest"
 import * as ProjectV1 from "../src/acp/ProjectV1.ts"
 import * as ProjectV2 from "../src/acp/ProjectV2.ts"
 import type { ConfigOption } from "../src/domain/Events.ts"
+
+// Updates are compared with `toEqual`: optional fields may hold `undefined`, which JSON drops on the wire.
 
 const mode = (value: string): ConfigOption => ({
   id: "mode",
@@ -15,7 +17,7 @@ describe("ACP v1 projection", () => {
   it("creates a tool call before updating it, without v2-only statuses", () => {
     const p = ProjectV1.makeProjector({ notices: false })
     const first = p.project("s", { _tag: "ToolCall", patch: { toolCallId: "t", name: "Read", status: "pending" } })
-    assert.deepStrictEqual(first, [{
+    expect(first).toEqual([{
       sessionUpdate: "tool_call",
       toolCallId: "t",
       title: "Read",
@@ -23,7 +25,7 @@ describe("ACP v1 projection", () => {
       status: "pending"
     }])
     const second = p.project("s", { _tag: "ToolCall", patch: { toolCallId: "t", status: "cancelled" } })
-    assert.deepStrictEqual(second, [{ sessionUpdate: "tool_call_update", toolCallId: "t", status: "failed" }])
+    expect(second).toEqual([{ sessionUpdate: "tool_call_update", toolCallId: "t", status: "failed" }])
   })
 
   it("keeps each session's tool calls apart and forgets them when its turn ends", () => {
@@ -66,7 +68,7 @@ describe("ACP v1 projection", () => {
     assert.deepStrictEqual(kinds("a", "strict"), ["config_option_update", "current_mode_update"])
     assert.deepStrictEqual(kinds("a", "strict"), ["config_option_update"])
     assert.deepStrictEqual(kinds("b", "strict"), ["config_option_update", "current_mode_update"])
-    assert.deepStrictEqual(ProjectV1.modeState([mode("standard")]), {
+    expect(ProjectV1.modeState([mode("standard")])).toEqual({
       currentModeId: "standard",
       availableModes: [{ id: "standard", name: "Standard" }, { id: "strict", name: "Strict" }]
     })
@@ -83,7 +85,7 @@ describe("ACP v2 projection", () => {
       noticeIdPrefix: "notice-abc",
       everyModelOptions: false
     })
-    assert.deepStrictEqual([...t3.project(retry), ...t3.project(failure)], [
+    expect([...t3.project(retry), ...t3.project(failure)]).toEqual([
       {
         sessionUpdate: "tool_call_update",
         toolCallId: "notice-abc-1",
@@ -122,7 +124,7 @@ describe("ACP v2 projection", () => {
   })
 
   it("encodes terminal output as base64", () => {
-    assert.deepStrictEqual(ProjectV2.project({ _tag: "Terminal", terminalId: "t", output: "hé\n", exitCode: 1 }), [{
+    expect(ProjectV2.project({ _tag: "Terminal", terminalId: "t", output: "hé\n", exitCode: 1 })).toEqual([{
       sessionUpdate: "terminal_update",
       terminalId: "t",
       output: { data: Buffer.from("hé\n").toString("base64") },
@@ -150,7 +152,7 @@ describe("ACP v2 projection", () => {
         }]
       }
     })
-    assert.deepStrictEqual(update, {
+    expect(update).toEqual({
       sessionUpdate: "tool_call_update",
       toolCallId: "e",
       content: [{

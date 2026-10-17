@@ -7,11 +7,9 @@
  * protocol describes itself as alpha.
  */
 import { Schema } from "effect"
+import { opt, optNull } from "../SchemaUtil.ts"
 
 export const SUPPORTED_PROTOCOL_VERSION = 1
-
-const opt = Schema.optionalKey
-const optNull = <S extends Schema.Constraint>(schema: S) => Schema.optionalKey(Schema.NullOr(schema))
 
 export const PermissionMode = Schema.Literals(["standard", "acceptEdits", "unrestricted", "strict"])
 export type PermissionMode = typeof PermissionMode.Type

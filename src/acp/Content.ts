@@ -5,8 +5,7 @@
  * discriminator, so one definition serves both versions.
  */
 import { Schema } from "effect"
-
-export const optNull = <S extends Schema.Constraint>(schema: S) => Schema.optionalKey(Schema.NullOr(schema))
+import { opt, optNull } from "../SchemaUtil.ts"
 
 /** `_meta`: the reserved ACP extensibility slot. */
 export const Meta = optNull(Schema.Record(Schema.String, Schema.Unknown))
@@ -144,7 +143,7 @@ export const AvailableCommandInput = Schema.Struct({ hint: Schema.String, _meta:
 export const SessionInfo = Schema.Struct({
   sessionId: Schema.String,
   cwd: Schema.String,
-  additionalDirectories: Schema.optionalKey(Schema.Array(Schema.String)),
+  additionalDirectories: opt(Schema.Array(Schema.String)),
   title: optNull(Schema.String),
   updatedAt: optNull(Schema.String),
   _meta: Meta

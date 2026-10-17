@@ -7,6 +7,7 @@
  */
 import { Schema } from "effect"
 import { ContentBlock, PermissionOptionKind, ToolKind } from "../acp/Content.ts"
+import { opt, optNull } from "../SchemaUtil.ts"
 
 export const StopReason = Schema.Literals([
   "end_turn",
@@ -40,7 +41,7 @@ export const ToolContent = Schema.TaggedUnion({
     path: Schema.String,
     oldText: Schema.NullOr(Schema.String),
     newText: Schema.String,
-    hunks: Schema.optionalKey(Schema.Array(DiffHunk))
+    hunks: opt(Schema.Array(DiffHunk))
   },
   Terminal: { terminalId: Schema.String }
 })
@@ -48,21 +49,21 @@ export type ToolContent = typeof ToolContent.Type
 
 export const Location = Schema.Struct({
   path: Schema.String,
-  line: Schema.optionalKey(Schema.Int)
+  line: opt(Schema.Int)
 })
 export type Location = typeof Location.Type
 
 /** A tool call upsert: omitted fields are unchanged; arrays replace. */
 export const ToolCallPatch = Schema.Struct({
   toolCallId: Schema.String,
-  name: Schema.optionalKey(Schema.String),
-  title: Schema.optionalKey(Schema.String),
-  kind: Schema.optionalKey(ToolKind),
-  status: Schema.optionalKey(ToolStatus),
-  content: Schema.optionalKey(Schema.Array(ToolContent)),
-  locations: Schema.optionalKey(Schema.Array(Location)),
-  rawInput: Schema.optionalKey(Schema.Unknown),
-  rawOutput: Schema.optionalKey(Schema.Unknown)
+  name: opt(Schema.String),
+  title: opt(Schema.String),
+  kind: opt(ToolKind),
+  status: opt(ToolStatus),
+  content: opt(Schema.Array(ToolContent)),
+  locations: opt(Schema.Array(Location)),
+  rawInput: opt(Schema.Unknown),
+  rawOutput: opt(Schema.Unknown)
 })
 export type ToolCallPatch = typeof ToolCallPatch.Type
 
@@ -76,7 +77,7 @@ export type PlanEntry = typeof PlanEntry.Type
 export const SelectChoice = Schema.Struct({
   value: Schema.String,
   name: Schema.String,
-  description: Schema.optionalKey(Schema.String)
+  description: opt(Schema.String)
 })
 export type SelectChoice = typeof SelectChoice.Type
 
@@ -84,7 +85,7 @@ export type SelectChoice = typeof SelectChoice.Type
 export const ConfigOption = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
-  description: Schema.optionalKey(Schema.String),
+  description: opt(Schema.String),
   category: Schema.Literals(["mode", "model", "thought_level", "model_config"]),
   currentValue: Schema.String,
   /** The choices of the session's model; none means the option does not apply to it. */
@@ -93,14 +94,14 @@ export const ConfigOption = Schema.Struct({
    * The choices of every model, for clients that show one session's options
    * for all models (T3 Code).
    */
-  everyModelOptions: Schema.optionalKey(Schema.Array(SelectChoice))
+  everyModelOptions: opt(Schema.Array(SelectChoice))
 })
 export type ConfigOption = typeof ConfigOption.Type
 
 export const Command = Schema.Struct({
   name: Schema.String,
   description: Schema.String,
-  hint: Schema.optionalKey(Schema.String)
+  hint: opt(Schema.String)
 })
 export type Command = typeof Command.Type
 
@@ -119,25 +120,25 @@ export const SessionEvent = Schema.TaggedUnion({
   /** Foreground state. `idle` ends a turn (or agent-initiated work). */
   State: {
     state: Schema.Literals(["running", "requires_action", "idle"]),
-    stopReason: Schema.optionalKey(StopReason),
-    error: Schema.optionalKey(ErrorInfo)
+    stopReason: opt(StopReason),
+    error: opt(ErrorInfo)
   },
   /** An agent-owned, display-only terminal. `output` is the full output so far. */
   Terminal: {
     terminalId: Schema.String,
-    command: Schema.optionalKey(Schema.String),
-    cwd: Schema.optionalKey(Schema.String),
-    output: Schema.optionalKey(Schema.String),
-    exitCode: Schema.optionalKey(Schema.NullOr(Schema.Int))
+    command: opt(Schema.String),
+    cwd: opt(Schema.String),
+    output: opt(Schema.String),
+    exitCode: optNull(Schema.Int)
   },
   AvailableCommands: { commands: Schema.Array(Command) },
   ConfigOptions: { options: Schema.Array(ConfigOption) },
-  SessionInfo: { title: Schema.optionalKey(Schema.String), updatedAt: Schema.optionalKey(Schema.String) },
+  SessionInfo: { title: opt(Schema.String), updatedAt: opt(Schema.String) },
   Usage: { used: Schema.Int, size: Schema.Int },
   Notice: {
     severity: Schema.Literals(["info", "warning", "error"]),
     title: Schema.String,
-    description: Schema.optionalKey(Schema.String)
+    description: opt(Schema.String)
   }
 })
 export type SessionEvent = typeof SessionEvent.Type
