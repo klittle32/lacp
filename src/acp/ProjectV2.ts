@@ -24,14 +24,10 @@ const configOption = (option: ConfigOption, choices: ReadonlyArray<SelectChoice>
   type: "select",
   configId: option.id,
   name: option.name,
-  ...(option.description === undefined ? {} : { description: option.description }),
+  description: option.description,
   category: option.category,
   currentValue: option.currentValue,
-  options: choices.map((o) => ({
-    value: o.value,
-    name: o.name,
-    ...(o.description === undefined ? {} : { description: o.description })
-  }))
+  options: choices.map((o) => ({ value: o.value, name: o.name, description: o.description }))
 })
 
 /**
@@ -85,14 +81,14 @@ const content = ToolContent.match({
 
 export const toolCall = (patch: ToolCallPatch): V2.ToolCallUpdate => ({
   toolCallId: patch.toolCallId,
-  ...(patch.name === undefined ? {} : { name: patch.name }),
-  ...(patch.title === undefined ? {} : { title: patch.title }),
-  ...(patch.kind === undefined ? {} : { kind: patch.kind }),
-  ...(patch.status === undefined ? {} : { status: patch.status }),
-  ...(patch.content === undefined ? {} : { content: patch.content.map(content) }),
-  ...(patch.locations === undefined ? {} : { locations: patch.locations }),
-  ...(patch.rawInput === undefined ? {} : { rawInput: patch.rawInput }),
-  ...(patch.rawOutput === undefined ? {} : { rawOutput: patch.rawOutput })
+  name: patch.name,
+  title: patch.title,
+  kind: patch.kind,
+  status: patch.status,
+  content: patch.content?.map(content),
+  locations: patch.locations,
+  rawInput: patch.rawInput,
+  rawOutput: patch.rawOutput
 })
 
 export const project = SessionEvent.match({
@@ -109,20 +105,15 @@ export const project = SessionEvent.match({
   ToolCall: (e): Updates => [{ sessionUpdate: "tool_call_update", ...toolCall(e.patch) }],
   State: (e): Updates =>
     e.state === "idle"
-      ? [{
-        sessionUpdate: "state_update",
-        state: "idle",
-        ...(e.stopReason === undefined ? {} : { stopReason: e.stopReason }),
-        ...(e.error === undefined ? {} : { error: e.error })
-      }]
+      ? [{ sessionUpdate: "state_update", state: "idle", stopReason: e.stopReason, error: e.error }]
       : [{ sessionUpdate: "state_update", state: e.state }],
   Terminal: (e): Updates => [{
     sessionUpdate: "terminal_update",
     terminalId: e.terminalId,
-    ...(e.command === undefined ? {} : { command: e.command }),
-    ...(e.cwd === undefined ? {} : { cwd: e.cwd }),
-    ...(e.output === undefined ? {} : { output: { data: Base64.encode(e.output) } }),
-    ...(e.exitCode === undefined ? {} : { exitStatus: { exitCode: e.exitCode } })
+    command: e.command,
+    cwd: e.cwd,
+    output: e.output === undefined ? undefined : { data: Base64.encode(e.output) },
+    exitStatus: e.exitCode === undefined ? undefined : { exitCode: e.exitCode }
   }],
   Plan: (
     e
@@ -132,24 +123,17 @@ export const project = SessionEvent.match({
     availableCommands: e.commands.map((c) => ({
       name: c.name,
       description: c.description,
-      ...(c.hint === undefined ? {} : { input: { type: "text" as const, hint: c.hint } })
+      input: c.hint === undefined ? undefined : { type: "text" as const, hint: c.hint }
     }))
   }],
   ConfigOptions: (
     e
   ): Updates => [{ sessionUpdate: "config_option_update", configOptions: configOptions(e.options, false) }],
-  SessionInfo: (e): Updates => [{
-    sessionUpdate: "session_info_update",
-    ...(e.title === undefined ? {} : { title: e.title }),
-    ...(e.updatedAt === undefined ? {} : { updatedAt: e.updatedAt })
-  }],
+  SessionInfo: (e): Updates => [{ sessionUpdate: "session_info_update", title: e.title, updatedAt: e.updatedAt }],
   Usage: (e): Updates => [{ sessionUpdate: "usage_update", used: e.used, size: e.size }],
-  Notice: (e): Updates => [{
-    sessionUpdate: "notice",
-    severity: e.severity,
-    title: e.title,
-    ...(e.description === undefined ? {} : { description: e.description })
-  }]
+  Notice: (
+    e
+  ): Updates => [{ sessionUpdate: "notice", severity: e.severity, title: e.title, description: e.description }]
 })
 
 export interface ProjectorV2 {
@@ -174,9 +158,9 @@ const noticeToolCall = (toolCallId: string, notice: Extract<SessionEvent, { read
   title: notice.title,
   kind: "other",
   status: notice.severity === "error" ? "failed" : "completed",
-  ...(notice.description === undefined
-    ? {}
-    : { content: [{ type: "content", content: { type: "text", text: notice.description } }] })
+  content: notice.description === undefined
+    ? undefined
+    : [{ type: "content", content: { type: "text", text: notice.description } }]
 }]
 
 /** Projects events for one connection. */

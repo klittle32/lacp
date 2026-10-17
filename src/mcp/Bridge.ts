@@ -107,19 +107,18 @@ export const connectAll = Effect.fnUntraced(function*(
   const parent = yield* Effect.scope
   const results = yield* Effect.forEach(
     servers,
-    (server) =>
-      Effect.gen(function*() {
-        const scope = yield* Scope.fork(parent)
-        return yield* connect(server, options).pipe(
-          Scope.provide(scope),
-          Effect.timeoutOrElse({
-            duration: options.timeout ?? "30 seconds",
-            orElse: () => Effect.fail({ server: server.name, message: "timed out connecting" })
-          }),
-          Effect.onError(() => Scope.close(scope, Exit.void)),
-          Effect.result
-        )
-      }),
+    Effect.fnUntraced(function*(server) {
+      const scope = yield* Scope.fork(parent)
+      return yield* connect(server, options).pipe(
+        Scope.provide(scope),
+        Effect.timeoutOrElse({
+          duration: options.timeout ?? "30 seconds",
+          orElse: () => Effect.fail({ server: server.name, message: "timed out connecting" })
+        }),
+        Effect.onError(() => Scope.close(scope, Exit.void)),
+        Effect.result
+      )
+    }),
     { concurrency: "unbounded" }
   )
   const connections = results.flatMap((r) => (r._tag === "Success" ? [r.success] : []))

@@ -6,6 +6,7 @@
  */
 import { Schema } from "effect"
 import { notification, request } from "../jsonrpc/Method.ts"
+import { opt } from "../SchemaUtil.ts"
 
 export const LATEST_PROTOCOL_VERSION = "2025-11-25"
 export const SUPPORTED_PROTOCOL_VERSIONS: ReadonlyArray<string> = [
@@ -15,7 +16,6 @@ export const SUPPORTED_PROTOCOL_VERSIONS: ReadonlyArray<string> = [
   "2024-11-05"
 ]
 
-const opt = Schema.optionalKey
 const Meta = opt(Schema.Record(Schema.String, Schema.Unknown))
 
 export const Implementation = Schema.Struct({

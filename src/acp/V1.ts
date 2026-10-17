@@ -7,6 +7,7 @@
  */
 import { Schema } from "effect"
 import { notification, request } from "../jsonrpc/Method.ts"
+import { opt, optNull } from "../SchemaUtil.ts"
 import {
   AvailableCommandInput,
   ContentBlock,
@@ -15,7 +16,6 @@ import {
   ListSessionsRequest,
   ListSessionsResponse,
   Meta,
-  optNull,
   PermissionOption,
   PlanEntryPriority,
   RequestPermissionResponse,
@@ -35,17 +35,17 @@ export const PROTOCOL_VERSION = 1
 const Marker = optNull(Schema.Struct({}))
 
 export const ClientCapabilities = Schema.Struct({
-  fs: Schema.optionalKey(Schema.Struct({
-    readTextFile: Schema.optionalKey(Schema.Boolean),
-    writeTextFile: Schema.optionalKey(Schema.Boolean)
+  fs: opt(Schema.Struct({
+    readTextFile: opt(Schema.Boolean),
+    writeTextFile: opt(Schema.Boolean)
   })),
-  terminal: Schema.optionalKey(Schema.Boolean),
+  terminal: opt(Schema.Boolean),
   session: optNull(Schema.Struct({
     configOptions: optNull(Schema.Struct({ boolean: Marker })),
     notices: Marker,
     compaction: Marker
   })),
-  auth: Schema.optionalKey(Schema.Struct({ terminal: Schema.optionalKey(Schema.Boolean) })),
+  auth: opt(Schema.Struct({ terminal: opt(Schema.Boolean) })),
   elicitation: optNull(Schema.Struct({ form: Marker, url: Marker })),
   _meta: Meta
 })
@@ -53,31 +53,31 @@ export type ClientCapabilities = typeof ClientCapabilities.Type
 
 export const InitializeRequest = Schema.Struct({
   protocolVersion: Schema.Int,
-  clientCapabilities: Schema.optionalKey(ClientCapabilities),
+  clientCapabilities: opt(ClientCapabilities),
   clientInfo: optNull(Implementation),
   _meta: Meta
 })
 export type InitializeRequest = typeof InitializeRequest.Type
 
 export const AgentCapabilities = Schema.Struct({
-  loadSession: Schema.optionalKey(Schema.Boolean),
-  promptCapabilities: Schema.optionalKey(Schema.Struct({
-    image: Schema.optionalKey(Schema.Boolean),
-    audio: Schema.optionalKey(Schema.Boolean),
-    embeddedContext: Schema.optionalKey(Schema.Boolean)
+  loadSession: opt(Schema.Boolean),
+  promptCapabilities: opt(Schema.Struct({
+    image: opt(Schema.Boolean),
+    audio: opt(Schema.Boolean),
+    embeddedContext: opt(Schema.Boolean)
   })),
-  mcpCapabilities: Schema.optionalKey(Schema.Struct({
-    http: Schema.optionalKey(Schema.Boolean),
-    sse: Schema.optionalKey(Schema.Boolean)
+  mcpCapabilities: opt(Schema.Struct({
+    http: opt(Schema.Boolean),
+    sse: opt(Schema.Boolean)
   })),
-  sessionCapabilities: Schema.optionalKey(Schema.Struct({
+  sessionCapabilities: opt(Schema.Struct({
     list: Marker,
     delete: Marker,
     additionalDirectories: Marker,
     resume: Marker,
     close: Marker
   })),
-  auth: Schema.optionalKey(Schema.Struct({ logout: Marker })),
+  auth: opt(Schema.Struct({ logout: Marker })),
   _meta: Meta
 })
 
@@ -87,8 +87,8 @@ export const AuthMethod = Schema.Union([
     id: Schema.String,
     name: Schema.String,
     description: optNull(Schema.String),
-    args: Schema.optionalKey(Schema.Array(Schema.String)),
-    env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+    args: opt(Schema.Array(Schema.String)),
+    env: opt(Schema.Record(Schema.String, Schema.String)),
     _meta: Meta
   }),
   Schema.Struct({
@@ -127,17 +127,17 @@ const NameValue = Schema.Struct({ name: Schema.String, value: Schema.String })
 /** v1 MCP server configs: stdio entries carry no `type`; `sse` is deprecated and not supported. */
 export const McpServer = Schema.Union([
   Schema.Struct({
-    type: Schema.optionalKey(Schema.Literal("stdio")),
+    type: opt(Schema.Literal("stdio")),
     name: Schema.String,
     command: Schema.String,
-    args: Schema.optionalKey(Schema.Array(Schema.String)),
-    env: Schema.optionalKey(Schema.Array(NameValue))
+    args: opt(Schema.Array(Schema.String)),
+    env: opt(Schema.Array(NameValue))
   }),
   Schema.Struct({
     type: Schema.Literals(["http", "sse"]),
     name: Schema.String,
     url: Schema.String,
-    headers: Schema.optionalKey(Schema.Array(NameValue))
+    headers: opt(Schema.Array(NameValue))
   })
 ])
 
@@ -188,8 +188,8 @@ export type SessionConfigOption = typeof SessionConfigOption.Type
 
 export const NewSessionRequest = Schema.Struct({
   cwd: Schema.String,
-  additionalDirectories: Schema.optionalKey(Schema.Array(Schema.String)),
-  mcpServers: Schema.optionalKey(McpServers),
+  additionalDirectories: opt(Schema.Array(Schema.String)),
+  mcpServers: opt(McpServers),
   _meta: Meta
 })
 
@@ -205,8 +205,8 @@ export const NewSession = request("session/new", NewSessionRequest, NewSessionRe
 export const LoadSessionRequest = Schema.Struct({
   sessionId: Schema.String,
   cwd: Schema.String,
-  additionalDirectories: Schema.optionalKey(Schema.Array(Schema.String)),
-  mcpServers: Schema.optionalKey(McpServers),
+  additionalDirectories: opt(Schema.Array(Schema.String)),
+  mcpServers: opt(McpServers),
   _meta: Meta
 })
 
@@ -291,8 +291,8 @@ export const ToolCallUpdateFields = {
   status: optNull(ToolCallStatus),
   content: optNull(Schema.Array(ToolCallContent)),
   locations: optNull(Schema.Array(ToolCallLocation)),
-  rawInput: Schema.optionalKey(Schema.Unknown),
-  rawOutput: Schema.optionalKey(Schema.Unknown),
+  rawInput: opt(Schema.Unknown),
+  rawOutput: opt(Schema.Unknown),
   _meta: Meta
 }
 
@@ -330,12 +330,12 @@ export const SessionUpdate = Schema.Union([
     toolCallId: Schema.String,
     title: Schema.String,
     name: optNull(Schema.String),
-    kind: Schema.optionalKey(ToolKind),
-    status: Schema.optionalKey(ToolCallStatus),
-    content: Schema.optionalKey(Schema.Array(ToolCallContent)),
-    locations: Schema.optionalKey(Schema.Array(ToolCallLocation)),
-    rawInput: Schema.optionalKey(Schema.Unknown),
-    rawOutput: Schema.optionalKey(Schema.Unknown),
+    kind: opt(ToolKind),
+    status: opt(ToolCallStatus),
+    content: opt(Schema.Array(ToolCallContent)),
+    locations: opt(Schema.Array(ToolCallLocation)),
+    rawInput: opt(Schema.Unknown),
+    rawOutput: opt(Schema.Unknown),
     _meta: Meta
   }),
   Schema.Struct({ sessionUpdate: Schema.Literal("tool_call_update"), ...ToolCallUpdateFields }),

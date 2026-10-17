@@ -53,8 +53,8 @@ const rpc = <A>(effect: Effect.Effect<A, AgentError>) => Effect.mapError(effect,
 const summary = (s: SessionSummary) => ({
   sessionId: s.sessionId,
   cwd: s.cwd,
-  ...(Option.isSome(s.title) ? { title: s.title.value } : {}),
-  ...(Option.isSome(s.updatedAt) ? { updatedAt: s.updatedAt.value } : {})
+  title: Option.getOrUndefined(s.title),
+  updatedAt: Option.getOrUndefined(s.updatedAt)
 })
 
 /** `session/set_model`: removed from the schema in 0.13.5, still sent by some v1 clients. */
@@ -64,19 +64,16 @@ const LegacySetModel = Method.request(
   Schema.Struct({})
 )
 
-const v1Options = (options: ReadonlyArray<ConfigOption>) => {
-  const modes = ProjectV1.modeState(options)
-  return {
-    configOptions: ProjectV1.configOptions(options),
-    ...(modes === undefined ? {} : { modes })
-  }
-}
+const v1Options = (options: ReadonlyArray<ConfigOption>) => ({
+  configOptions: ProjectV1.configOptions(options),
+  modes: ProjectV1.modeState(options)
+})
 
 const commandsV2 = (commands: ReadonlyArray<Command>) =>
   commands.map((c) => ({
     name: c.name,
     description: c.description,
-    ...(c.hint === undefined ? {} : { input: { type: "text" as const, hint: c.hint } })
+    input: c.hint === undefined ? undefined : { type: "text" as const, hint: c.hint }
   }))
 
 export class AcpServer extends Context.Service<AcpServer, {
@@ -101,11 +98,13 @@ export class AcpServer extends Context.Service<AcpServer, {
       const authenticate = ({ methodId }: { readonly methodId: string }) =>
         methodId === SETUP_METHOD_ID ? Effect.succeed({}) : Effect.fail(RpcError.invalidParams({ methodId }))
 
-      const listSessions = (params: { readonly cwd?: string | null; readonly cursor?: string | null }) =>
+      const listSessions = (
+        params: { readonly cwd?: string | null | undefined; readonly cursor?: string | null | undefined }
+      ) =>
         rpc(agent.listSessions({ cwd: Option.fromNullishOr(params.cwd), cursor: Option.fromNullishOr(params.cursor) }))
           .pipe(Effect.map((r) => ({
             sessions: r.sessions.map(summary),
-            ...(Option.isSome(r.nextCursor) ? { nextCursor: r.nextCursor.value } : {})
+            nextCursor: Option.getOrUndefined(r.nextCursor)
           })))
 
       const closeSession = ({ sessionId }: { readonly sessionId: string }) =>
@@ -153,8 +152,9 @@ export class AcpServer extends Context.Service<AcpServer, {
             : rpc(agent.setConfigOption(params.sessionId, params.configId, params.value)).pipe(
               Effect.map((options) => ({ configOptions: ProjectV1.configOptions(options) }))
             )),
-        Method.handle(V1.Prompt, ({ prompt, sessionId }) =>
-          Effect.gen(function*() {
+        Method.handle(
+          V1.Prompt,
+          Effect.fnUntraced(function*({ prompt, sessionId }) {
             const handle = yield* rpc(agent.prompt(sessionId, prompt))
             const result = yield* handle.completion.pipe(Effect.onInterrupt(() => agent.cancel(sessionId)))
             if (result.stopReason === "error") {
@@ -165,7 +165,8 @@ export class AcpServer extends Context.Service<AcpServer, {
               return yield* RpcError.of(error.code, error.message)
             }
             return { stopReason: result.stopReason }
-          })),
+          })
+        ),
         Method.handleNotification(V1.Cancel, ({ sessionId }) => agent.cancel(sessionId))
       ])
 
@@ -177,66 +178,65 @@ export class AcpServer extends Context.Service<AcpServer, {
           Effect.flatMap((state) => client.emit(sessionId, { _tag: "State", state }))
         )
 
-      /** Whether the v2 client shows one session's options for all models; set by `initialize`, before any session. */
-      let everyModel = false
-
-      const v2 = Method.router([
-        Method.handle(V2.Login, authenticate),
-        Method.handle(
-          V2.Logout,
-          () =>
-            Effect.logInfo("auth/logout: sign out with Letta Code itself (`letta setup`); nothing to do here").pipe(
-              Effect.as({})
-            )
-        ),
-        Method.handle(V2.NewSession, (params) =>
-          Mcp.fromWire(2, params.mcpServers).pipe(
-            Effect.flatMap((mcpServers) => rpc(agent.newSession({ cwd: params.cwd, mcpServers }))),
-            Effect.map((setup) => ({
-              sessionId: setup.sessionId,
-              configOptions: ProjectV2.configOptions(setup.configOptions, everyModel),
-              availableCommands: commandsV2(setup.commands)
-            }))
-          )),
-        Method.handle(V2.ResumeSession, (params) => {
-          const replayFrom = params.replayFrom
-          if (replayFrom !== undefined && replayFrom !== null && replayFrom.type !== "start") {
-            return Effect.fail(RpcError.invalidParams({ replayFrom }))
-          }
-          return Mcp.fromWire(2, params.mcpServers).pipe(
-            Effect.flatMap((mcpServers) =>
-              rpc(agent.loadSession({
-                sessionId: params.sessionId,
-                cwd: params.cwd,
-                replay: replayFrom?.type === "start",
-                mcpServers
+      /** The v2 method set, for a client that does or does not show one session's options for all models. */
+      const v2 = (everyModel: boolean) =>
+        Method.router([
+          Method.handle(V2.Login, authenticate),
+          Method.handle(
+            V2.Logout,
+            () =>
+              Effect.logInfo("auth/logout: sign out with Letta Code itself (`letta setup`); nothing to do here").pipe(
+                Effect.as({})
+              )
+          ),
+          Method.handle(V2.NewSession, (params) =>
+            Mcp.fromWire(2, params.mcpServers).pipe(
+              Effect.flatMap((mcpServers) => rpc(agent.newSession({ cwd: params.cwd, mcpServers }))),
+              Effect.map((setup) => ({
+                sessionId: setup.sessionId,
+                configOptions: ProjectV2.configOptions(setup.configOptions, everyModel),
+                availableCommands: commandsV2(setup.commands)
               }))
-            ),
-            Effect.tap((setup) => snapshot(setup.sessionId)),
-            Effect.map((setup) => ({
-              configOptions: ProjectV2.configOptions(setup.configOptions, everyModel),
-              availableCommands: commandsV2(setup.commands)
-            }))
-          )
-        }),
-        Method.handle(V2.ListSessions, listSessions),
-        Method.handle(V2.CloseSession, closeSession),
-        Method.handle(V2.SetSessionConfigOption, (params) =>
-          params.type !== "id" || typeof params.value !== "string"
-            ? Effect.fail(RpcError.invalidParams({ configId: params.configId, type: params.type }))
-            : rpc(agent.setConfigOption(params.sessionId, params.configId, params.value)).pipe(
-              Effect.map((options) => ({ configOptions: ProjectV2.configOptions(options, everyModel) }))
             )),
-        Method.handle(V2.Prompt, ({ prompt, sessionId }) =>
-          // Once inserted, a v2 prompt must not be answered with an error, so the
-          // receipt is produced uninterruptibly. Waiting for the session's previous
-          // turn stays interruptible (see Agent.prompt), so it can be cancelled.
-          rpc(agent.prompt(sessionId, prompt)).pipe(
-            Effect.map((handle) => ({ messageId: handle.messageId })),
-            Effect.uninterruptible
-          )),
-        Method.handleNotification(V2.Cancel, ({ sessionId }) => agent.cancel(sessionId))
-      ])
+          Method.handle(V2.ResumeSession, (params) => {
+            const replayFrom = params.replayFrom
+            if (replayFrom !== undefined && replayFrom !== null && replayFrom.type !== "start") {
+              return Effect.fail(RpcError.invalidParams({ replayFrom }))
+            }
+            return Mcp.fromWire(2, params.mcpServers).pipe(
+              Effect.flatMap((mcpServers) =>
+                rpc(agent.loadSession({
+                  sessionId: params.sessionId,
+                  cwd: params.cwd,
+                  replay: replayFrom?.type === "start",
+                  mcpServers
+                }))
+              ),
+              Effect.tap((setup) => snapshot(setup.sessionId)),
+              Effect.map((setup) => ({
+                configOptions: ProjectV2.configOptions(setup.configOptions, everyModel),
+                availableCommands: commandsV2(setup.commands)
+              }))
+            )
+          }),
+          Method.handle(V2.ListSessions, listSessions),
+          Method.handle(V2.CloseSession, closeSession),
+          Method.handle(V2.SetSessionConfigOption, (params) =>
+            params.type !== "id" || typeof params.value !== "string"
+              ? Effect.fail(RpcError.invalidParams({ configId: params.configId, type: params.type }))
+              : rpc(agent.setConfigOption(params.sessionId, params.configId, params.value)).pipe(
+                Effect.map((options) => ({ configOptions: ProjectV2.configOptions(options, everyModel) }))
+              )),
+          Method.handle(V2.Prompt, ({ prompt, sessionId }) =>
+            // Once inserted, a v2 prompt must not be answered with an error, so the
+            // receipt is produced uninterruptibly. Waiting for the session's previous
+            // turn stays interruptible (see Agent.prompt), so it can be cancelled.
+            rpc(agent.prompt(sessionId, prompt)).pipe(
+              Effect.map((handle) => ({ messageId: handle.messageId })),
+              Effect.uninterruptible
+            )),
+          Method.handleNotification(V2.Cancel, ({ sessionId }) => agent.cancel(sessionId))
+        ])
 
       // --- initialize -------------------------------------------------------
 
@@ -252,8 +252,7 @@ export class AcpServer extends Context.Service<AcpServer, {
         if (Option.isSome(v2Request)) {
           const capabilities = v2Request.value.capabilities ?? {}
           yield* client.select({ version: 2, capabilities, client: v2Request.value.info })
-          everyModel = showsOptionsForEveryModel(v2Request.value.info)
-          yield* Ref.set(surface, Option.some(v2))
+          yield* Ref.set(surface, Option.some(v2(showsOptionsForEveryModel(v2Request.value.info))))
           yield* Effect.logInfo(`ACP v2 negotiated with ${v2Request.value.info.name} ${v2Request.value.info.version}`)
           yield* agent.warmup
           const terminal = capabilities.auth?.terminal !== undefined && capabilities.auth.terminal !== null

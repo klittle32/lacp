@@ -91,18 +91,19 @@ export class AgentResolver extends Context.Service<AgentResolver, {
       })
 
       /** Records `agentId` as the last agent of the project at `cwd`, keeping its other settings. */
-      const remember = (cwd: string, agentId: string) =>
-        Effect.gen(function*() {
+      const remember = Effect.fnUntraced(
+        function*(cwd: string, agentId: string) {
           const dir = path.join(cwd, ".letta")
           const file = path.join(dir, "settings.local.json")
           const existing = yield* fs.readFileString(file).pipe(
             Effect.asSome,
-            Effect.catchTag("PlatformError", (error) =>
-              error.reason._tag === "NotFound" ? Effect.succeedNone : Effect.fail(error))
+            Effect.catchTag(
+              "PlatformError",
+              (error) => error.reason._tag === "NotFound" ? Effect.succeedNone : Effect.fail(error)
+            )
           )
           const settings = Option.match(existing, {
-            onNone: () =>
-              Option.some({}),
+            onNone: () => Option.some({}),
             onSome: decodeSettingsObject
           })
           yield* Option.match(settings, {
@@ -114,9 +115,13 @@ export class AgentResolver extends Context.Service<AgentResolver, {
                 )
               )
           })
-        }).pipe(
-          Effect.catch((error) => Effect.logWarning(`Could not record agent ${agentId} for ${cwd}: ${error.message}`))
-        )
+        },
+        (effect, cwd, agentId) =>
+          Effect.catch(
+            effect,
+            (error) => Effect.logWarning(`Could not record agent ${agentId} for ${cwd}: ${error.message}`)
+          )
+      )
 
       const create = Effect.fnUntraced(function*(conn: LettaConnection, cwd: string) {
         const created = yield* conn.call(
@@ -125,7 +130,7 @@ export class AgentResolver extends Context.Service<AgentResolver, {
             request_id,
             personality: "memo",
             pin_global: true,
-            ...(Option.isSome(config.model) ? { model: config.model.value } : {})
+            model: Option.getOrUndefined(config.model)
           }),
           CreateAgentResponse,
           { timeout: "2 minutes" }

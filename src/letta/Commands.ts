@@ -29,6 +29,6 @@ export const fromDeviceStatus = (status: DeviceStatus["device_status"]): Readonl
   ...(status.mod_commands ?? []).map((c): Command => ({
     name: c.id,
     description: c.description,
-    ...(c.args === undefined || c.args === null ? {} : { hint: c.args })
+    hint: c.args ?? undefined
   }))
 ]

@@ -1,5 +1,5 @@
 import { NodeServices } from "@effect/platform-node"
-import { assert, describe, it } from "@effect/vitest"
+import { assert, describe, expect, it } from "@effect/vitest"
 import { Effect, Option, Path } from "effect"
 import * as Tools from "../src/letta/Tools.ts"
 
@@ -41,7 +41,8 @@ describe("Tools.present", () => {
     Effect.gen(function*() {
       const p = yield* present("Edit", { file_path: "src/a.ts", old_string: "old", new_string: "new" })
       assert.deepStrictEqual(p.locations, [{ path: "/work/src/a.ts" }])
-      assert.deepStrictEqual(p.content, [{ _tag: "Diff", path: "/work/src/a.ts", oldText: "old", newText: "new" }])
+      // No hunks without an approval request: the field is `undefined`, which `toEqual` ignores.
+      expect(p.content).toEqual([{ _tag: "Diff", path: "/work/src/a.ts", oldText: "old", newText: "new" }])
     }))
 
   it.effect("treats shell tools as terminals", () =>

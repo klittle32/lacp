@@ -9,6 +9,7 @@
 import { Option, type Path, Schema } from "effect"
 import type { ToolKind } from "../acp/Content.ts"
 import type { DiffHunk, Location, PlanEntry, ToolContent } from "../domain/Events.ts"
+import { opt } from "../SchemaUtil.ts"
 import type { DiffPreview } from "./Protocol.ts"
 
 export interface Presentation {
@@ -25,7 +26,6 @@ export interface ToolContext {
   readonly path: Path.Path
 }
 
-const opt = Schema.optionalKey
 const Read = Schema.Struct({ file_path: Schema.String, offset: opt(Schema.Finite), limit: opt(Schema.Finite) })
 const Write = Schema.Struct({ file_path: Schema.String, content: Schema.String })
 const Edit = Schema.Struct({ file_path: Schema.String, old_string: Schema.String, new_string: Schema.String })
@@ -147,7 +147,7 @@ export const present = (
             : ` (lines ${offset}-${offset + limit - 1})`
           return {
             ...generic(`Read ${display(file_path)}${range}`, "read"),
-            locations: [{ path: absolute(file_path), ...(offset === undefined ? {} : { line: Math.max(1, offset) }) }]
+            locations: [{ path: absolute(file_path), line: offset === undefined ? undefined : Math.max(1, offset) }]
           }
         }
       })
@@ -160,39 +160,33 @@ export const present = (
     case "WriteArtifactFile":
       return Option.match(decodeWrite(input), {
         onNone: () => generic("Write file", "edit"),
-        onSome: ({ content, file_path }) => {
-          const fileHunks = hunksFor(file_path)
-          return {
-            ...generic(`Write ${display(file_path)}`, "edit"),
-            locations: [{ path: absolute(file_path) }],
-            content: [{
-              _tag: "Diff",
-              path: absolute(file_path),
-              oldText: null,
-              newText: content,
-              ...(fileHunks === undefined ? {} : { hunks: fileHunks })
-            }]
-          }
-        }
+        onSome: ({ content, file_path }) => ({
+          ...generic(`Write ${display(file_path)}`, "edit"),
+          locations: [{ path: absolute(file_path) }],
+          content: [{
+            _tag: "Diff",
+            path: absolute(file_path),
+            oldText: null,
+            newText: content,
+            hunks: hunksFor(file_path)
+          }]
+        })
       })
     case "Edit":
     case "MultiEdit":
       return Option.match(decodeEdit(input), {
         onNone: () => generic("Edit file", "edit"),
-        onSome: ({ file_path, new_string, old_string }) => {
-          const fileHunks = hunksFor(file_path)
-          return {
-            ...generic(`Edit ${display(file_path)}`, "edit"),
-            locations: [{ path: absolute(file_path) }],
-            content: [{
-              _tag: "Diff",
-              path: absolute(file_path),
-              oldText: old_string,
-              newText: new_string,
-              ...(fileHunks === undefined ? {} : { hunks: fileHunks })
-            }]
-          }
-        }
+        onSome: ({ file_path, new_string, old_string }) => ({
+          ...generic(`Edit ${display(file_path)}`, "edit"),
+          locations: [{ path: absolute(file_path) }],
+          content: [{
+            _tag: "Diff",
+            path: absolute(file_path),
+            oldText: old_string,
+            newText: new_string,
+            hunks: hunksFor(file_path)
+          }]
+        })
       })
     case "ApplyPatch":
       return Option.match(decodeApplyPatch(input), {

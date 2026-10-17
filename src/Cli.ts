@@ -42,101 +42,98 @@ class SetupFailed extends Schema.TaggedError<SetupFailed, { readonly brand: uniq
   { exitCode: Schema.Int }
 ) {}
 
+/** A flag that falls back to the environment variable `env` (built with `config`), which its description names. */
+const envFlag = <A>(flag: Flag.Flag<A>, env: string, config: (name: string) => Config.Config<A>, description: string) =>
+  flag.pipe(Flag.withDescription(`${description} Env: ${env}`), Flag.withFallbackConfig(config(env)))
+
+const literals = <const L extends ReadonlyArray<string>>(values: L) => (name: string) => Config.Literals(values, name)
+
 const flags = {
-  auth: Flag.Literals("auth", AuthMode.literals).pipe(
-    Flag.withDescription(
-      "How Letta Code authenticates: host (use the host's own setup), cloud-oauth (`letta setup` login), " +
-        "api-key (LETTA_API_KEY), or local (on-device backend). Env: LACP_AUTH"
-    ),
-    Flag.withFallbackConfig(Config.Literals(AuthMode.literals, "LACP_AUTH")),
-    Flag.withDefault<AuthMode>("host")
-  ),
-  agentId: Flag.String("agent-id").pipe(
-    Flag.withDescription("The Letta agent to talk to (default: the host's last-used agent). Env: LETTA_AGENT_ID"),
-    Flag.withFallbackConfig(Config.String("LETTA_AGENT_ID")),
-    Flag.optional
-  ),
-  model: Flag.String("model").pipe(
-    Flag.withDescription("Model handle for new sessions, e.g. anthropic/claude-sonnet-4-5. Env: LACP_MODEL"),
-    Flag.withFallbackConfig(Config.String("LACP_MODEL")),
-    Flag.optional
-  ),
-  permissionMode: Flag.Literals("permission-mode", PermissionMode.literals).pipe(
-    Flag.withDescription("Permission mode of new sessions (default: unrestricted). Env: LACP_PERMISSION_MODE"),
-    Flag.withFallbackConfig(Config.Literals(PermissionMode.literals, "LACP_PERMISSION_MODE")),
-    Flag.optional
-  ),
-  lettaPath: Flag.String("letta-path").pipe(
-    Flag.withDescription("Path to the `letta` executable (default: discovered). Env: LACP_LETTA_PATH"),
-    Flag.withFallbackConfig(Config.String("LACP_LETTA_PATH")),
-    Flag.optional
-  ),
-  lettaRuntime: Flag.Literals("letta-runtime", LettaRuntime.literals).pipe(
-    Flag.withDescription(
-      "Runtime for Letta Code: auto (Node while ~/.letta/settings.json holds your login, else Bun if installed), " +
-        "node, or bun. Letta Code keeps its login in the system keychain only under Bun. Env: LACP_LETTA_RUNTIME"
-    ),
-    Flag.withFallbackConfig(Config.Literals(LettaRuntime.literals, "LACP_LETTA_RUNTIME")),
-    Flag.withDefault<LettaRuntime>("auto")
-  ),
-  appServerUrl: Flag.String("app-server-url").pipe(
-    Flag.withDescription(
-      "Connect to a running `letta server --listen` instead of starting one. Env: LACP_APP_SERVER_URL"
-    ),
-    Flag.withFallbackConfig(Config.String("LACP_APP_SERVER_URL")),
-    Flag.optional
-  ),
-  acpVersion: Flag.Literals("acp-version", AcpVersion.literals).pipe(
-    Flag.withDescription(
-      "Highest ACP protocol version to negotiate (2 = draft v2 when the client asks). Env: LACP_ACP_VERSION"
-    ),
-    Flag.withFallbackConfig(Config.Literals(AcpVersion.literals, "LACP_ACP_VERSION")),
-    Flag.withDefault<AcpVersion>("2")
-  ),
-  echoPrompts: Flag.Boolean("echo-prompts").pipe(
-    Flag.withDescription(
-      "ACP v2: send each prompt back to the client as a user_message (T3 Code shows it as a second message). " +
-        "Env: LACP_ECHO_PROMPTS"
-    ),
-    Flag.withFallbackConfig(Config.Boolean("LACP_ECHO_PROMPTS")),
-    Flag.withDefault(false)
-  ),
-  waitForBackground: Flag.Boolean("wait-for-background").pipe(
-    Flag.withDescription(
-      "Keep a turn open until background subagents it started report back (--no-wait-for-background to end it " +
-        "right away). Env: LACP_WAIT_FOR_BACKGROUND"
-    ),
-    Flag.withFallbackConfig(Config.Boolean("LACP_WAIT_FOR_BACKGROUND")),
-    Flag.withDefault(true)
-  ),
-  startupTimeout: Flag.Int("startup-timeout").pipe(
-    Flag.withDescription("Seconds to wait for the Letta Code App Server to start. Env: LACP_STARTUP_TIMEOUT"),
-    Flag.withFallbackConfig(Config.Int("LACP_STARTUP_TIMEOUT")),
-    Flag.withDefault(60)
-  ),
-  logFile: Flag.String("log-file").pipe(
-    Flag.withDescription(
-      "Also append the server's log to this file (T3 Code keeps no agent stderr). Env: LACP_LOG_FILE"
-    ),
-    Flag.withFallbackConfig(Config.String("LACP_LOG_FILE")),
-    Flag.optional
-  )
+  auth: envFlag(
+    Flag.Literals("auth", AuthMode.literals),
+    "LACP_AUTH",
+    literals(AuthMode.literals),
+    "How Letta Code authenticates: host (use the host's own setup), cloud-oauth (`letta setup` login), " +
+      "api-key (LETTA_API_KEY), or local (on-device backend)."
+  ).pipe(Flag.withDefault<AuthMode>("host")),
+  agentId: envFlag(
+    Flag.String("agent-id"),
+    "LETTA_AGENT_ID",
+    Config.String,
+    "The Letta agent to talk to (default: the host's last-used agent)."
+  ).pipe(Flag.optional),
+  model: envFlag(
+    Flag.String("model"),
+    "LACP_MODEL",
+    Config.String,
+    "Model handle for new sessions, e.g. anthropic/claude-sonnet-4-5."
+  ).pipe(Flag.optional),
+  permissionMode: envFlag(
+    Flag.Literals("permission-mode", PermissionMode.literals),
+    "LACP_PERMISSION_MODE",
+    literals(PermissionMode.literals),
+    "Permission mode of new sessions (default: unrestricted)."
+  ).pipe(Flag.optional),
+  lettaPath: envFlag(
+    Flag.String("letta-path"),
+    "LACP_LETTA_PATH",
+    Config.String,
+    "Path to the `letta` executable (default: discovered)."
+  ).pipe(Flag.optional),
+  lettaRuntime: envFlag(
+    Flag.Literals("letta-runtime", LettaRuntime.literals),
+    "LACP_LETTA_RUNTIME",
+    literals(LettaRuntime.literals),
+    "Runtime for Letta Code: auto (Node while ~/.letta/settings.json holds your login, else Bun if installed), " +
+      "node, or bun. Letta Code keeps its login in the system keychain only under Bun."
+  ).pipe(Flag.withDefault<LettaRuntime>("auto")),
+  appServerUrl: envFlag(
+    Flag.String("app-server-url"),
+    "LACP_APP_SERVER_URL",
+    Config.String,
+    "Connect to a running `letta server --listen` instead of starting one."
+  ).pipe(Flag.optional),
+  acpVersion: envFlag(
+    Flag.Literals("acp-version", AcpVersion.literals),
+    "LACP_ACP_VERSION",
+    literals(AcpVersion.literals),
+    "Highest ACP protocol version to negotiate (2 = draft v2 when the client asks)."
+  ).pipe(Flag.withDefault<AcpVersion>("2")),
+  echoPrompts: envFlag(
+    Flag.Boolean("echo-prompts"),
+    "LACP_ECHO_PROMPTS",
+    Config.Boolean,
+    "ACP v2: send each prompt back to the client as a user_message (T3 Code shows it as a second message)."
+  ).pipe(Flag.withDefault(false)),
+  waitForBackground: envFlag(
+    Flag.Boolean("wait-for-background"),
+    "LACP_WAIT_FOR_BACKGROUND",
+    Config.Boolean,
+    "Keep a turn open until background subagents it started report back (--no-wait-for-background to end it " +
+      "right away)."
+  ).pipe(Flag.withDefault(true)),
+  startupTimeout: envFlag(
+    Flag.Int("startup-timeout"),
+    "LACP_STARTUP_TIMEOUT",
+    Config.Int,
+    "Seconds to wait for the Letta Code App Server to start."
+  ).pipe(Flag.withDefault(60)),
+  logFile: envFlag(
+    Flag.String("log-file"),
+    "LACP_LOG_FILE",
+    Config.String,
+    "Also append the server's log to this file (T3 Code keeps no agent stderr)."
+  ).pipe(Flag.optional)
 }
 
-type Flags = {
-  readonly auth: AuthMode
-  readonly agentId: Option.Option<string>
-  readonly model: Option.Option<string>
-  readonly permissionMode: Option.Option<PermissionMode>
-  readonly lettaPath: Option.Option<string>
-  readonly lettaRuntime: LettaRuntime
-  readonly appServerUrl: Option.Option<string>
-  readonly acpVersion: "1" | "2"
-  readonly echoPrompts: boolean
-  readonly waitForBackground: boolean
-  readonly startupTimeout: number
-  readonly logFile: Option.Option<string>
-}
+/** The root command; its flags are shared with the subcommands. */
+const root = Command.make("lacp").pipe(
+  Command.withSharedFlags(flags),
+  Command.withDescription("An Agent Client Protocol (ACP) server for Letta Code")
+)
+
+/** The parsed flags. */
+type Flags = Effect.Success<typeof root>
 
 /** Builds the configuration from parsed flags plus `LETTA_API_KEY`. */
 const configLayer = (input: Flags) =>
@@ -183,30 +180,24 @@ const ServerLayer = AcpServer.layer.pipe(
   Layer.provide(Transport.layerStdio)
 )
 
-/** The root command; its flags are shared with the subcommands. */
-const root = Command.make("lacp").pipe(
-  Command.withSharedFlags(flags),
-  Command.withDescription("An Agent Client Protocol (ACP) server for Letta Code")
-)
-
 /** Configuration for subcommands, from the root command's flags. */
 const rootConfig = Layer.unwrap(Effect.map(root, configLayer))
 
 const lacp = root.pipe(
-  Command.withHandler(() =>
-    Effect.gen(function*() {
-      const server = yield* AcpServer
-      yield* Effect.logDebug(`lacp ${VERSION} serving ACP on stdio`)
-      yield* server.serve
-    })
-  ),
+  Command.withHandler(Effect.fnUntraced(function*() {
+    const server = yield* AcpServer
+    yield* Effect.logDebug(`lacp ${VERSION} serving ACP on stdio`)
+    yield* server.serve
+  })),
   Command.provide((input) =>
     ServerLayer.pipe(Layer.provide(configLayer(input)), Layer.provideMerge(LogFile.layer(input.logFile)))
   )
 )
 
-const setup = Command.make("setup", {}, () =>
-  Effect.gen(function*() {
+const setup = Command.make(
+  "setup",
+  {},
+  Effect.fnUntraced(function*() {
     const executable = yield* LettaExecutable
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
     const install = yield* executable.resolve
@@ -220,10 +211,11 @@ const setup = Command.make("setup", {}, () =>
       })
     )
     return yield* (code === 0 ? Effect.void : Effect.fail(new SetupFailed({ exitCode: code })))
-  })).pipe(
-    Command.withDescription("Sign in to Letta by running the host's `letta setup`"),
-    Command.provide(() => LettaExecutable.layer.pipe(Layer.provide(rootConfig)))
-  )
+  })
+).pipe(
+  Command.withDescription("Sign in to Letta by running the host's `letta setup`"),
+  Command.provide(() => LettaExecutable.layer.pipe(Layer.provide(rootConfig)))
+)
 
 /** Where Letta Code's login lives, and whether the chosen runtime can read it. */
 const loginReport = Effect.fnUntraced(function*(auth: AuthMode, runtime: LettaInstall["runtime"]) {
@@ -256,8 +248,10 @@ const loginReport = Effect.fnUntraced(function*(auth: AuthMode, runtime: LettaIn
   ]
 })
 
-const doctor = Command.make("doctor", {}, () =>
-  Effect.gen(function*() {
+const doctor = Command.make(
+  "doctor",
+  {},
+  Effect.fnUntraced(function*() {
     const config = yield* LacpConfig
     const executable = yield* LettaExecutable
     const appServer = yield* LettaAppServer
@@ -286,16 +280,17 @@ const doctor = Command.make("doctor", {}, () =>
       Effect.catch((e) => Effect.succeed(`unavailable (${e.message})`))
     )
     yield* Console.log(`models: ${models}`)
-  })).pipe(
-    Command.withDescription("Check the Letta Code installation and App Server"),
-    Command.provide(() =>
-      LettaAppServer.layer.pipe(
-        Layer.provideMerge(LettaExecutable.layer),
-        Layer.provide(layerWebSocket),
-        Layer.provideMerge(rootConfig)
-      )
+  })
+).pipe(
+  Command.withDescription("Check the Letta Code installation and App Server"),
+  Command.provide(() =>
+    LettaAppServer.layer.pipe(
+      Layer.provideMerge(LettaExecutable.layer),
+      Layer.provide(layerWebSocket),
+      Layer.provideMerge(rootConfig)
     )
   )
+)
 
 export const command = lacp.pipe(Command.withSubcommands([setup, doctor]))
 

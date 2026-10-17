@@ -29,14 +29,10 @@ const configOption = (option: ConfigOption): V1.SessionConfigOption => ({
   type: "select",
   id: option.id,
   name: option.name,
-  ...(option.description === undefined ? {} : { description: option.description }),
+  description: option.description,
   category: option.category,
   currentValue: option.currentValue,
-  options: option.options.map((o) => ({
-    value: o.value,
-    name: o.name,
-    ...(o.description === undefined ? {} : { description: o.description })
-  }))
+  options: option.options.map((o) => ({ value: o.value, name: o.name, description: o.description }))
 })
 
 /** The config options that apply to the session (those with choices). */
@@ -48,11 +44,7 @@ export const modeState = (options: ReadonlyArray<ConfigOption>) => {
   const mode = options.find((o) => o.category === "mode")
   return mode === undefined ? undefined : {
     currentModeId: mode.currentValue,
-    availableModes: mode.options.map((o) => ({
-      id: o.value,
-      name: o.name,
-      ...(o.description === undefined ? {} : { description: o.description })
-    }))
+    availableModes: mode.options.map((o) => ({ id: o.value, name: o.name, description: o.description }))
   }
 }
 
@@ -95,33 +87,28 @@ const makeTurnProjector = (features: ClientFeatures): TurnProjector => {
     Terminal: (item): V1.ToolCallContent => renderTerminal(item.terminalId)
   })
 
-  const toolCall = (patch: ToolCallPatch): V1.ToolCallUpdate => ({
+  const toolCall = (patch: ToolCallPatch) => ({
     toolCallId: patch.toolCallId,
-    ...(patch.title === undefined ? {} : { title: patch.title }),
-    ...(patch.name === undefined ? {} : { name: patch.name }),
-    ...(patch.kind === undefined ? {} : { kind: patch.kind }),
-    ...(patch.status === undefined ? {} : { status: status(patch.status) }),
-    ...(patch.content === undefined ? {} : { content: patch.content.map(content) }),
-    ...(patch.locations === undefined ? {} : { locations: patch.locations }),
-    ...(patch.rawInput === undefined ? {} : { rawInput: patch.rawInput }),
-    ...(patch.rawOutput === undefined ? {} : { rawOutput: patch.rawOutput })
+    title: patch.title,
+    name: patch.name,
+    kind: patch.kind,
+    status: patch.status === undefined ? undefined : status(patch.status),
+    content: patch.content?.map(content),
+    locations: patch.locations,
+    rawInput: patch.rawInput,
+    rawOutput: patch.rawOutput
   })
 
+  /** The first update of a tool call is a `tool_call`, which must carry a title and a status. */
   const announce = (patch: ToolCallPatch): Updates => {
     const update = toolCall(patch)
     if (announced.has(update.toolCallId)) return [{ sessionUpdate: "tool_call_update", ...update }]
     announced.add(update.toolCallId)
     return [{
       sessionUpdate: "tool_call",
-      toolCallId: update.toolCallId,
+      ...update,
       title: update.title ?? update.name ?? "Tool call",
-      ...(update.name === undefined || update.name === null ? {} : { name: update.name }),
-      ...(update.kind === undefined || update.kind === null ? {} : { kind: update.kind }),
-      status: update.status ?? "pending",
-      ...(update.content === undefined || update.content === null ? {} : { content: update.content }),
-      ...(update.locations === undefined || update.locations === null ? {} : { locations: update.locations }),
-      ...(update.rawInput === undefined ? {} : { rawInput: update.rawInput }),
-      ...(update.rawOutput === undefined ? {} : { rawOutput: update.rawOutput })
+      status: update.status ?? "pending"
     }]
   }
 
@@ -161,26 +148,17 @@ const makeTurnProjector = (features: ClientFeatures): TurnProjector => {
       availableCommands: e.commands.map((c) => ({
         name: c.name,
         description: c.description,
-        ...(c.hint === undefined ? {} : { input: { hint: c.hint } })
+        input: c.hint === undefined ? undefined : { hint: c.hint }
       }))
     }],
     ConfigOptions: (
       e
     ): Updates => [{ sessionUpdate: "config_option_update", configOptions: configOptions(e.options) }],
-    SessionInfo: (e): Updates => [{
-      sessionUpdate: "session_info_update",
-      ...(e.title === undefined ? {} : { title: e.title }),
-      ...(e.updatedAt === undefined ? {} : { updatedAt: e.updatedAt })
-    }],
+    SessionInfo: (e): Updates => [{ sessionUpdate: "session_info_update", title: e.title, updatedAt: e.updatedAt }],
     Usage: (e): Updates => [{ sessionUpdate: "usage_update", used: e.used, size: e.size }],
     Notice: (e): Updates =>
       features.notices
-        ? [{
-          sessionUpdate: "notice",
-          severity: e.severity,
-          title: e.title,
-          ...(e.description === undefined ? {} : { description: e.description })
-        }]
+        ? [{ sessionUpdate: "notice", severity: e.severity, title: e.title, description: e.description }]
         : []
   })
 

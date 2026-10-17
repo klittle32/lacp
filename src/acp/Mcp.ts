@@ -30,13 +30,12 @@ const toConfig = (server: Wire): Option.Option<McpServerConfig> => {
   return Option.some({ _tag: "Http", name: server.name, url: server.url, headers: record(server.headers) })
 }
 
-export const fromWire = (version: 1 | 2, servers: ReadonlyArray<unknown> | undefined) =>
-  Effect.gen(function*() {
-    const configs: Array<McpServerConfig> = []
-    for (const raw of servers ?? []) {
-      const config = Option.flatMap(version === 1 ? decodeV1(raw) : decodeV2(raw), toConfig)
-      if (Option.isSome(config)) configs.push(config.value)
-      else yield* Effect.logWarning("Skipping an MCP server the client offered: unsupported or malformed entry", raw)
-    }
-    return configs
-  })
+export const fromWire = Effect.fnUntraced(function*(version: 1 | 2, servers: ReadonlyArray<unknown> | undefined) {
+  const configs: Array<McpServerConfig> = []
+  for (const raw of servers ?? []) {
+    const config = Option.flatMap(version === 1 ? decodeV1(raw) : decodeV2(raw), toConfig)
+    if (Option.isSome(config)) configs.push(config.value)
+    else yield* Effect.logWarning("Skipping an MCP server the client offered: unsupported or malformed entry", raw)
+  }
+  return configs
+})

@@ -88,8 +88,8 @@ export const http = Effect.fnUntraced(function*(config: Http): Effect.fn.Return<
   const headers = (accept: string) => ({
     ...config.headers,
     accept,
-    ...(sessionId === undefined ? {} : { "mcp-session-id": sessionId }),
-    ...(protocolVersion === undefined ? {} : { "mcp-protocol-version": protocolVersion })
+    "mcp-session-id": sessionId,
+    "mcp-protocol-version": protocolVersion
   })
 
   const remember = (response: HttpClientResponse.HttpClientResponse) => {
@@ -117,8 +117,8 @@ export const http = Effect.fnUntraced(function*(config: Http): Effect.fn.Return<
         )
     })
 
-  const post = (line: string) =>
-    Effect.gen(function*() {
+  const post = Effect.fnUntraced(
+    function*(line: string) {
       const response = yield* client.execute(
         HttpClientRequest.post(config.url).pipe(
           HttpClientRequest.setHeaders(headers("application/json, text/event-stream")),
@@ -142,9 +142,10 @@ export const http = Effect.fnUntraced(function*(config: Http): Effect.fn.Return<
       }
       const body = yield* response.text
       if (body.trim() !== "") yield* Queue.offer(incoming, body)
-    }).pipe(
-      Effect.catch((error) => failRequest(line, `Request to ${config.url} failed: ${error.message}`))
-    )
+    },
+    (effect, line) =>
+      Effect.catch(effect, (error) => failRequest(line, `Request to ${config.url} failed: ${error.message}`))
+  )
 
   /** The optional GET stream for server-initiated messages (405 means the server has none). */
   const listen = Effect.gen(function*() {

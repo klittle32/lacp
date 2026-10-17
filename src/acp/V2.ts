@@ -8,6 +8,7 @@
  */
 import { Schema } from "effect"
 import { notification, request } from "../jsonrpc/Method.ts"
+import { opt, optNull } from "../SchemaUtil.ts"
 import {
   AvailableCommandInput,
   ContentBlock,
@@ -17,7 +18,6 @@ import {
   ListSessionsRequest,
   ListSessionsResponse,
   Meta,
-  optNull,
   PermissionOption,
   PlanEntryPriority,
   RequestPermissionResponse,
@@ -45,7 +45,7 @@ export type ClientCapabilities = typeof ClientCapabilities.Type
 export const InitializeRequest = Schema.Struct({
   protocolVersion: Schema.Int,
   info: Implementation,
-  capabilities: Schema.optionalKey(ClientCapabilities),
+  capabilities: opt(ClientCapabilities),
   _meta: Meta
 })
 export type InitializeRequest = typeof InitializeRequest.Type
@@ -68,8 +68,8 @@ export const AuthMethod = Schema.Union([
     methodId: Schema.String,
     name: Schema.String,
     description: optNull(Schema.String),
-    args: Schema.optionalKey(Schema.Array(Schema.String)),
-    env: Schema.optionalKey(Schema.Array(EnvVariable)),
+    args: opt(Schema.Array(Schema.String)),
+    env: opt(Schema.Array(EnvVariable)),
     _meta: Meta
   }),
   Schema.Struct({
@@ -84,8 +84,8 @@ export const AuthMethod = Schema.Union([
 export const InitializeResponse = Schema.Struct({
   protocolVersion: Schema.Int,
   info: Implementation,
-  capabilities: Schema.optionalKey(AgentCapabilities),
-  authMethods: Schema.optionalKey(Schema.Array(AuthMethod)),
+  capabilities: opt(AgentCapabilities),
+  authMethods: opt(Schema.Array(AuthMethod)),
   _meta: Meta
 })
 
@@ -108,14 +108,14 @@ export const McpServer = Schema.Union([
     type: Schema.Literal("stdio"),
     name: Schema.String,
     command: Schema.String,
-    args: Schema.optionalKey(Schema.Array(Schema.String)),
-    env: Schema.optionalKey(Schema.Array(NameValue))
+    args: opt(Schema.Array(Schema.String)),
+    env: opt(Schema.Array(NameValue))
   }),
   Schema.Struct({
     type: Schema.Literal("http"),
     name: Schema.String,
     url: Schema.String,
-    headers: Schema.optionalKey(Schema.Array(NameValue))
+    headers: opt(Schema.Array(NameValue))
   })
 ])
 
@@ -158,15 +158,15 @@ export const AvailableCommand = Schema.Struct({
 
 export const NewSessionRequest = Schema.Struct({
   cwd: Schema.String,
-  additionalDirectories: Schema.optionalKey(Schema.Array(Schema.String)),
-  mcpServers: Schema.optionalKey(McpServers),
+  additionalDirectories: opt(Schema.Array(Schema.String)),
+  mcpServers: opt(McpServers),
   _meta: Meta
 })
 
 export const NewSessionResponse = Schema.Struct({
   sessionId: Schema.String,
-  configOptions: Schema.optionalKey(Schema.Array(SessionConfigOption)),
-  availableCommands: Schema.optionalKey(Schema.Array(AvailableCommand)),
+  configOptions: opt(Schema.Array(SessionConfigOption)),
+  availableCommands: opt(Schema.Array(AvailableCommand)),
   _meta: Meta
 })
 
@@ -177,15 +177,15 @@ export const ReplayFrom = Schema.Struct({ type: Schema.String, _meta: Meta })
 export const ResumeSessionRequest = Schema.Struct({
   sessionId: Schema.String,
   cwd: Schema.String,
-  additionalDirectories: Schema.optionalKey(Schema.Array(Schema.String)),
-  mcpServers: Schema.optionalKey(McpServers),
+  additionalDirectories: opt(Schema.Array(Schema.String)),
+  mcpServers: opt(McpServers),
   replayFrom: optNull(ReplayFrom),
   _meta: Meta
 })
 
 export const ResumeSessionResponse = Schema.Struct({
-  configOptions: Schema.optionalKey(Schema.Array(SessionConfigOption)),
-  availableCommands: Schema.optionalKey(Schema.Array(AvailableCommand)),
+  configOptions: opt(Schema.Array(SessionConfigOption)),
+  availableCommands: opt(Schema.Array(AvailableCommand)),
   _meta: Meta
 })
 
@@ -259,8 +259,8 @@ export const ToolCallUpdateFields = {
   status: optNull(ToolCallStatus),
   content: optNull(Schema.Array(ToolCallContent)),
   locations: optNull(Schema.Array(ToolCallLocation)),
-  rawInput: Schema.optionalKey(Schema.Unknown),
-  rawOutput: Schema.optionalKey(Schema.Unknown),
+  rawInput: opt(Schema.Unknown),
+  rawOutput: opt(Schema.Unknown),
   _meta: Meta
 }
 
@@ -270,7 +270,7 @@ export type ToolCallUpdate = typeof ToolCallUpdate.Type
 export const ErrorDetails = Schema.Struct({
   code: Schema.Int,
   message: Schema.String,
-  data: Schema.optionalKey(Schema.Unknown)
+  data: opt(Schema.Unknown)
 })
 
 export const StopReason = Schema.Literals([

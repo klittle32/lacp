@@ -157,7 +157,7 @@ const retryNotice = (retry: {
   title: retry.attempt === undefined
     ? "Retrying"
     : `Retrying (attempt ${retry.attempt}${retry.max_attempts === undefined ? "" : `/${retry.max_attempts}`})`,
-  ...(retry.message === undefined ? {} : { description: retry.message })
+  description: retry.message
 })
 
 const clip = (text: string) => (text.length > MAX_OUTPUT ? `${text.slice(0, MAX_OUTPUT)}\n… (truncated)` : text)
@@ -215,7 +215,7 @@ export const make = (context: TranslatorContext): Translator => {
       kind: p.kind,
       locations: p.locations,
       content,
-      ...(Option.isSome(state.input) ? { rawInput: state.input.value } : {})
+      rawInput: Option.getOrUndefined(state.input)
     }
   }
 
@@ -428,7 +428,7 @@ export const make = (context: TranslatorContext): Translator => {
         clientMessageIds: d.client_message_ids ?? []
       }],
       error_message: (d) => [
-        event({ _tag: "Notice", severity: "error", title: d.message, ...(d.detail ? { description: d.detail } : {}) })
+        event({ _tag: "Notice", severity: "error", title: d.message, description: d.detail ? d.detail : undefined })
       ],
       usage_statistics: (d) => events(usage(d))
     })
