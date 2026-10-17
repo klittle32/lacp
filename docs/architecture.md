@@ -24,7 +24,10 @@ src/
 ├── domain/Events.ts      the version-neutral session model (v2-shaped)
 ├── agent/
 │   ├── AcpServer.ts      initialize negotiation; v1 and v2 method sets over the core
-│   ├── Agent.ts          the core: sessions ⇄ Letta runtimes, frame routing, turns, approvals, history
+│   ├── Agent.ts          the core service: opening sessions, their runtimes and the public operations (turns, history)
+│   ├── Session.ts        the session record (which fiber mutates each field), its translator and MCP tool updates
+│   ├── Frames.ts         a runtime's frames → events, approvals, turn ends (held turns, grace), over an explicit `Deps`
+│   ├── Runtime.ts        `runtime_start` for a conversation: lacp's client info and flags, frames subscribed first
 │   ├── Turn.ts           a turn's phase (Submitted, Queued, Running, Held) and its transitions
 │   ├── AgentResolver.ts  which Letta agent a session uses: configured, the host's last one, or a new one
 │   ├── Settings.ts       a session's model, effort and mode: config options and applying changes (a service)
@@ -78,8 +81,8 @@ id) start their runtime at once.
    is _inserted_: a `UserMessage` event and `State(running)` are emitted and a `PromptHandle` is returned.
    - v2 answers `session/prompt` right away with `{ messageId }`.
    - v1 awaits `handle.completion` and answers with the stop reason.
-3. The session's frame fiber decodes App Server frames for its conversation (`RuntimeFrame`) and routes them by
-   type (`Match`):
+3. The session's frame fiber (`agent/Frames.ts`) decodes App Server frames for its conversation (`RuntimeFrame`)
+   and routes them by type (`Match`):
    - `stream_delta` → `Translator` → events (message/thought chunks, tool-call upserts, terminals, plans, usage);
    - `control_request` → a permission request to the client, answered back as an `approval_response`;
    - `turn_finished` → remaining tool calls are closed, `State(idle, stopReason)` is emitted and the turn resolves.
@@ -106,7 +109,7 @@ started once Letta dequeues or echoes it, so a `turn_finished` for the earlier w
 rules are the turn's phases in `src/agent/Turn.ts`: Submitted (sent, not yet acknowledged), Queued, Running, and
 Held (waiting for background work).
 
-Each turn's steps are logged (`logTurn` in `Agent.ts`) with the session, the turn (the id of the prompt's user
+Each turn's steps are logged (`logTurn` in `Frames.ts`) with the session, the turn (the id of the prompt's user
 message) and the time since the turn began: accepted or queued, first output, approval waits and answers, held for
 background work, cancellation, and the end with its stop reason. The end is logged at info, the steps at debug.
 Prompts and tool input are never logged.
