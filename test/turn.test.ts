@@ -9,7 +9,9 @@ const submitted = Effect.gen(function*() {
     runs: new Set(),
     preexisting: new Set(),
     phase: Turn.Phase.Submitted({ started: false, early: Option.none() }),
-    error: Option.none()
+    error: Option.none(),
+    began: 0,
+    streamed: false
   }
   return turn
 })

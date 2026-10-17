@@ -44,6 +44,10 @@ export interface Turn {
   phase: Phase
   /** An error Letta reported in the turn's stream, for its end. */
   error: Option.Option<string>
+  /** When the turn began, in epoch milliseconds; its log reports times from here. */
+  readonly began: number
+  /** Whether the turn has streamed output yet; its log reports the first. */
+  streamed: boolean
 }
 
 /** Whether Letta has started the turn, so that its end is the turn's end. */
