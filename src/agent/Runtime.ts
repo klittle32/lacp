@@ -51,7 +51,7 @@ export const startRuntime = Effect.fnUntraced(
             ? { conversation_id: target.conversationId.value }
             : { create_conversation: { body: {} } }),
           cwd: target.cwd,
-          ...(Option.isSome(target.mode) ? { mode: target.mode.value } : {}),
+          mode: Option.getOrUndefined(target.mode),
           client_info: { name: AGENT_NAME, title: AGENT_TITLE, version: VERSION },
           recover_approvals: true,
           force_device_status: true,

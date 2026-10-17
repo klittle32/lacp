@@ -129,7 +129,7 @@ export const completeTurn = Effect.fnUntraced(function*(deps: Deps, session: Ses
     _tag: "State",
     state: "idle",
     stopReason: result.stopReason,
-    ...(Option.isSome(result.error) ? { error: result.error.value } : {})
+    error: Option.getOrUndefined(result.error)
   })
   const turn = session.turn
   session.turn = Option.none()

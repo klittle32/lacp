@@ -503,7 +503,7 @@ export class Agent extends Context.Service<Agent, {
               limit,
               order: "desc",
               order_by: "last_message_at",
-              ...(Option.isSome(input.cursor) ? { after: input.cursor.value } : {})
+              after: Option.getOrUndefined(input.cursor)
             }
           }),
           ConversationListResponse
