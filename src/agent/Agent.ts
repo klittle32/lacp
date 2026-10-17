@@ -27,8 +27,6 @@ import {
   Stream
 } from "effect"
 import { Crypto } from "effect/Crypto"
-import { HttpClient } from "effect/http"
-import { ChildProcessSpawner } from "effect/process"
 import type { ContentBlock } from "../acp/Content.ts"
 import * as Content from "../acp/Content.ts"
 import { LacpConfig } from "../Config.ts"
@@ -212,8 +210,7 @@ export class Agent extends Context.Service<Agent, {
       const sessionIds = yield* SessionIds
       const agents = yield* AgentResolver
       const path = yield* Path.Path
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-      const httpClient = yield* HttpClient.HttpClient
+      const bridges = yield* Bridge.McpBridges
       const layerScope = yield* Effect.scope
       const sessions = new Map<string, Session>()
 
@@ -733,16 +730,27 @@ export class Agent extends Context.Service<Agent, {
         return session
       })
 
-      /** Connects the client's MCP servers for a session (inside the session's scope). */
-      const connectMcp = (servers: ReadonlyArray<McpServerConfig>, cwd: string, scope: Scope.Scope) =>
-        Bridge.connectAll(servers, {
-          roots: [cwd],
-          clientInfo: { name: AGENT_NAME, title: AGENT_TITLE, version: VERSION }
-        }).pipe(
-          Scope.provide(scope),
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-          Effect.provideService(HttpClient.HttpClient, httpClient)
-        )
+      /**
+       * Opens a session in a new scope: Letta and the client's MCP servers
+       * (rooted at the session's directory) connect concurrently, then `open`
+       * builds the session. The scope is closed again if opening fails.
+       */
+      const inSessionScope = <A, E>(
+        input: { readonly cwd: string; readonly mcpServers: ReadonlyArray<McpServerConfig> },
+        open: (scope: Scope.Closeable, conn: LettaConnection, mcp: Bridge.McpBridge) => Effect.Effect<A, E>
+      ) =>
+        Scope.fork(layerScope).pipe(Effect.flatMap((scope) =>
+          Effect.all([
+            connection,
+            bridges.connectAll(input.mcpServers, {
+              roots: [input.cwd],
+              clientInfo: { name: AGENT_NAME, title: AGENT_TITLE, version: VERSION }
+            }).pipe(Scope.provide(scope))
+          ], { concurrency: "unbounded" }).pipe(
+            Effect.flatMap(([conn, mcp]) => open(scope, conn, mcp)),
+            Effect.onError(() => Scope.close(scope, Exit.void))
+          )
+        ))
 
       /** Waits briefly for the runtime's first device status (mode and commands). */
       const settle = Effect.fnUntraced(function*(session: Session, attachment: Attachment) {
@@ -806,42 +814,38 @@ export class Agent extends Context.Service<Agent, {
        * Letta beyond reading the agent and its models: the conversation (and,
        * where none is set up, the agent) is created by the first prompt.
        */
-      const openPending = Effect.fnUntraced(function*(input: {
+      const openPending = (input: {
         readonly sessionId: string
         readonly cwd: string
         readonly mcpServers: ReadonlyArray<McpServerConfig>
-      }) {
-        const scope = yield* Scope.fork(layerScope)
-        return yield* Effect.gen(function*() {
-          const [conn, mcp] = yield* Effect.all([connection, connectMcp(input.mcpServers, input.cwd, scope)], {
-            concurrency: "unbounded"
-          })
-          const agentId = yield* agents.find(conn, input.cwd)
-          const [agent, models] = yield* Effect.all([
-            Option.match(agentId, {
-              onNone: () => Effect.succeedNone,
-              onSome: (id) => agents.retrieve(conn, id).pipe(Effect.asSome)
-            }),
-            settings.catalog(conn)
-          ], { concurrency: "unbounded" })
-          const session = yield* makeSession({
-            id: input.sessionId,
-            agentId,
-            cwd: input.cwd,
-            scope,
-            mcp,
-            mcpServers: input.mcpServers,
-            settings: initialSettings(
-              { agent: Option.getOrNull(agent) },
-              models,
-              Option.orElse(config.permissionMode, () => Option.some(DEFAULT_PERMISSION_MODE))
-            ),
-            commands: Commands.builtins
-          })
-          yield* settings.preferConfiguredModel(session.settings)
-          return session
-        }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
-      })
+      }) =>
+        inSessionScope(input, (scope, conn, mcp) =>
+          Effect.gen(function*() {
+            const agentId = yield* agents.find(conn, input.cwd)
+            const [agent, models] = yield* Effect.all([
+              Option.match(agentId, {
+                onNone: () => Effect.succeedNone,
+                onSome: (id) => agents.retrieve(conn, id).pipe(Effect.asSome)
+              }),
+              settings.catalog(conn)
+            ], { concurrency: "unbounded" })
+            const session = yield* makeSession({
+              id: input.sessionId,
+              agentId,
+              cwd: input.cwd,
+              scope,
+              mcp,
+              mcpServers: input.mcpServers,
+              settings: initialSettings(
+                { agent: Option.getOrNull(agent) },
+                models,
+                Option.orElse(config.permissionMode, () => Option.some(DEFAULT_PERMISSION_MODE))
+              ),
+              commands: Commands.builtins
+            })
+            yield* settings.preferConfiguredModel(session.settings)
+            return session
+          }))
 
       /**
        * Runs `pending` while the session has no conversation yet, or `attached`
@@ -902,41 +906,37 @@ export class Agent extends Context.Service<Agent, {
        * the MCP tools. Replayed history comes before the session goes live. The
        * scope is closed again if opening fails.
        */
-      const openSession = Effect.fnUntraced(function*(input: {
+      const openSession = (input: {
         readonly sessionId: string
         readonly conversationId: string
         readonly cwd: string
         readonly mcpServers: ReadonlyArray<McpServerConfig>
         readonly replay: boolean
-      }) {
-        const scope = yield* Scope.fork(layerScope)
-        return yield* Effect.gen(function*() {
-          const [conn, mcp] = yield* Effect.all([connection, connectMcp(input.mcpServers, input.cwd, scope)], {
-            concurrency: "unbounded"
-          })
-          const stored = yield* storedConversation(conn, input.sessionId, input.conversationId, input.cwd)
-          const started = yield* startRuntime(conn, scope, {
-            agentId: stored.agentId,
-            conversationId: Option.some(input.conversationId),
-            cwd: input.cwd,
-            tools: yield* mcp.tools,
-            mode: config.permissionMode
-          })
-          const session = yield* makeSession({
-            id: input.sessionId,
-            agentId: Option.some(stored.agentId),
-            cwd: input.cwd,
-            scope,
-            mcp,
-            mcpServers: input.mcpServers,
-            settings: initialSettings(started.response, yield* settings.catalog(conn), config.permissionMode),
-            commands: []
-          })
-          if (input.replay) yield* replay(session, conn, input.conversationId)
-          yield* settle(session, yield* attach(session, started, conn))
-          return { session, conversation: stored.conversation }
-        }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
-      })
+      }) =>
+        inSessionScope(input, (scope, conn, mcp) =>
+          Effect.gen(function*() {
+            const stored = yield* storedConversation(conn, input.sessionId, input.conversationId, input.cwd)
+            const started = yield* startRuntime(conn, scope, {
+              agentId: stored.agentId,
+              conversationId: Option.some(input.conversationId),
+              cwd: input.cwd,
+              tools: yield* mcp.tools,
+              mode: config.permissionMode
+            })
+            const session = yield* makeSession({
+              id: input.sessionId,
+              agentId: Option.some(stored.agentId),
+              cwd: input.cwd,
+              scope,
+              mcp,
+              mcpServers: input.mcpServers,
+              settings: initialSettings(started.response, yield* settings.catalog(conn), config.permissionMode),
+              commands: []
+            })
+            if (input.replay) yield* replay(session, conn, input.conversationId)
+            yield* settle(session, yield* attach(session, started, conn))
+            return { session, conversation: stored.conversation }
+          }))
 
       const newSession = Effect.fn("Agent.newSession")(function*(input: {
         readonly cwd: string

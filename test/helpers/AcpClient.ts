@@ -17,6 +17,7 @@ import { Host, type HostShape } from "../../src/Host.ts"
 import { JsonRpcPeer } from "../../src/jsonrpc/Peer.ts"
 import { Transport } from "../../src/jsonrpc/Transport.ts"
 import { LettaAppServer } from "../../src/letta/AppServer.ts"
+import { McpBridges } from "../../src/mcp/Bridge.ts"
 import { AGENT_ID, type FakeLetta } from "./FakeLetta.ts"
 
 /** What an App Server layer may depend on in tests. */
@@ -84,6 +85,7 @@ export const startWith = <E>(
       Layer.provide(Settings.layer),
       Layer.provide(SessionIds.layer),
       Layer.provide(AgentResolver.layer),
+      Layer.provide(McpBridges.layer),
       Layer.provide(FetchHttpClient.layer),
       Layer.provide(appServer),
       Layer.provideMerge(AcpClient.layer),

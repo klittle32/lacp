@@ -6,9 +6,9 @@
  * a failing server cannot leak or block the others), registers their tools with
  * the session's Letta runtime, and executes Letta's tool calls against them.
  */
-import { Effect, Exit, Match, Option, PubSub, Schema, Scope, Stream } from "effect"
-import type { HttpClient } from "effect/http"
-import type { ChildProcessSpawner } from "effect/process"
+import { Context, Effect, Exit, Layer, Match, Option, PubSub, Schema, Scope, Semaphore, Stream } from "effect"
+import { HttpClient } from "effect/http"
+import { ChildProcessSpawner } from "effect/process"
 import type { ToolKind } from "../acp/Content.ts"
 import type { ExternalToolDefinition, ExternalToolResult } from "../letta/Protocol.ts"
 import type { McpServerConfig } from "./Config.ts"
@@ -116,7 +116,7 @@ export const connectAll = Effect.fnUntraced(function*(
             duration: options.timeout ?? "30 seconds",
             orElse: () => Effect.fail({ server: server.name, message: "timed out connecting" })
           }),
-          Effect.tapError(() => Scope.close(scope, Exit.void)),
+          Effect.onError(() => Scope.close(scope, Exit.void)),
           Effect.result
         )
       }),
@@ -129,7 +129,9 @@ export const connectAll = Effect.fnUntraced(function*(
   for (const failure of failures) yield* Effect.logWarning(`MCP server ${failure.server}: ${failure.message}`)
 
   let entries = new Map<string, Entry>()
-  const rebuild = Effect.gen(function*() {
+  // Servers change their tools independently; one rebuild at a time keeps the last one current.
+  const rebuildLock = yield* Semaphore.make(1)
+  const rebuild = Semaphore.withPermits(rebuildLock, 1)(Effect.gen(function*() {
     const next = new Map<string, Entry>()
     for (const connection of connections) {
       for (const tool of yield* connection.tools) {
@@ -139,7 +141,7 @@ export const connectAll = Effect.fnUntraced(function*(
       }
     }
     entries = next
-  })
+  }))
   yield* rebuild
 
   const changes = yield* PubSub.unbounded<void>()
@@ -193,3 +195,27 @@ export const connectAll = Effect.fnUntraced(function*(
     failures
   } satisfies McpBridge
 })
+
+/** Connects the MCP servers an ACP client provides to a session, as a {@link McpBridge}. */
+export class McpBridges extends Context.Service<McpBridges, {
+  /** Connects `servers` for as long as the current scope stays open. */
+  connectAll(
+    servers: ReadonlyArray<McpServerConfig>,
+    options: ConnectOptions
+  ): Effect.Effect<McpBridge, never, Scope.Scope>
+}>()("lacp/mcp/McpBridges") {
+  static readonly layer = Layer.effect(
+    McpBridges,
+    Effect.gen(function*() {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+      const httpClient = yield* HttpClient.HttpClient
+      return McpBridges.of({
+        connectAll: (servers, options) =>
+          connectAll(servers, options).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.provideService(HttpClient.HttpClient, httpClient)
+          )
+      })
+    })
+  )
+}

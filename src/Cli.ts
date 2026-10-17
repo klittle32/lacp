@@ -29,6 +29,7 @@ import { LettaExecutable, type LettaInstall } from "./letta/Executable.ts"
 import * as Login from "./letta/Login.ts"
 import { ListModelsResponse, PermissionMode } from "./letta/Protocol.ts"
 import * as LogFile from "./LogFile.ts"
+import { McpBridges } from "./mcp/Bridge.ts"
 import { VERSION } from "./Version.ts"
 
 class InvalidConfiguration extends Schema.TaggedError<InvalidConfiguration, { readonly brand: unique symbol }>()(
@@ -172,6 +173,7 @@ const ServerLayer = AcpServer.layer.pipe(
   Layer.provide(Settings.layer),
   Layer.provide(SessionIds.layer),
   Layer.provide(AgentResolver.layer),
+  Layer.provide(McpBridges.layer),
   Layer.provide(FetchHttpClient.layer),
   Layer.provide(LettaAppServer.layer),
   Layer.provide(LettaExecutable.layer),
