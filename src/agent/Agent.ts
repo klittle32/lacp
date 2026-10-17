@@ -7,6 +7,10 @@
  * protocol-version neutral: it emits {@link SessionEvent}s and permission
  * requests through {@link AcpClient}, and exposes turn completion as an effect
  * that the v1 surface awaits and the v2 surface reports via `state_update`.
+ *
+ * This module owns the service, its sessions, their runtimes and the public
+ * operations. The session record is `Session.ts`; the handling of a runtime's
+ * frames and the end of a turn are `Frames.ts`; starting a runtime is `Runtime.ts`.
  */
 import {
   Clock,
@@ -16,15 +20,9 @@ import {
   Effect,
   Equal,
   Exit,
-  FiberHandle,
-  FiberSet,
   Layer,
-  type LogLevel,
-  Match,
   Option,
   Path,
-  PubSub,
-  Schema,
   Scope,
   Semaphore,
   Stream
@@ -33,32 +31,18 @@ import { Crypto } from "effect/Crypto"
 import type { ContentBlock } from "../acp/Content.ts"
 import * as Content from "../acp/Content.ts"
 import { LacpConfig } from "../Config.ts"
-import type { Command, ConfigOption, PermissionDecision, SessionEvent } from "../domain/Events.ts"
+import type { Command, ConfigOption, SessionEvent } from "../domain/Events.ts"
 import { Host } from "../Host.ts"
-import { type Frame, LettaAppServer, type LettaConnection } from "../letta/AppServer.ts"
+import { LettaAppServer, type LettaConnection } from "../letta/AppServer.ts"
 import * as Commands from "../letta/Commands.ts"
 import * as History from "../letta/History.ts"
 import {
   AbortMessageResponse,
-  type ControlRequest,
   ConversationListResponse,
   ConversationRetrieveResponse,
-  type DeviceStatus,
   ExecuteCommandResponse,
-  type ExternalToolCallRequest,
-  type ExternalToolDefinition,
   GetCwdMapResponse,
-  InputAccepted,
-  type LoopStatus,
-  type PermissionMode,
-  type QueueUpdate,
-  RuntimeExternalToolsUpdateResponse,
-  RuntimeFrame,
-  type RuntimeScope,
-  RuntimeStartResponse,
-  type StreamDelta,
-  type SubagentState,
-  type TurnFinished
+  InputAccepted
 } from "../letta/Protocol.ts"
 import * as Translator from "../letta/Translator.ts"
 import * as Bridge from "../mcp/Bridge.ts"
@@ -67,17 +51,12 @@ import { AGENT_NAME, AGENT_TITLE, VERSION } from "../Version.ts"
 import { AgentResolver } from "./AgentResolver.ts"
 import { AcpClient } from "./Client.ts"
 import { type AgentError, AgentUnavailable, PromptRejected, SessionNotFound, unavailable } from "./Errors.ts"
+import { completeTurn, consume, type Deps, emitAll, logTurn, onTurnFinished, setForeground, watch } from "./Frames.ts"
 import { plainText, slashCommand, toLettaContent } from "./Prompt.ts"
+import { type StartedRuntime, startRuntime } from "./Runtime.ts"
+import { type Attachment, makeSession, type Session, targetOf, translatorContext } from "./Session.ts"
 import { SessionIds } from "./SessionIds.ts"
-import {
-  configOptions,
-  decodePermissionMode,
-  DEFAULT_PERMISSION_MODE,
-  initialSettings,
-  type SessionSettings,
-  Settings,
-  type Target
-} from "./Settings.ts"
+import { configOptions, DEFAULT_PERMISSION_MODE, initialSettings, Settings } from "./Settings.ts"
 import * as Turn from "./Turn.ts"
 import type { TurnResult } from "./Turn.ts"
 
@@ -105,63 +84,6 @@ export interface SessionSummary {
   readonly cwd: string
   readonly title: Option.Option<string>
   readonly updatedAt: Option.Option<string>
-}
-
-const decodeRuntimeFrame = Schema.decodeUnknownOption(RuntimeFrame)
-const decodeDeltaRun = Schema.decodeUnknownOption(Schema.Struct({ run_id: Schema.String }))
-
-// ---------------------------------------------------------------------------
-// Session state
-// ---------------------------------------------------------------------------
-
-interface Attachment {
-  readonly generation: number
-  readonly scope: Scope.Closeable
-  readonly connection: LettaConnection
-  readonly runtime: RuntimeScope
-}
-
-interface Session {
-  /**
-   * The ACP session id: the Letta conversation's id for a session opened on
-   * one, lacp's own for a session opened before it had one (see SessionIds).
-   */
-  readonly id: string
-  /** The Letta agent; a session opened without one gets it with its conversation. */
-  agentId: Option.Option<string>
-  readonly cwd: string
-  readonly scope: Scope.Closeable
-  readonly translator: Translator.Translator
-  readonly turnLock: Semaphore.Semaphore
-  readonly permissions: FiberSet.FiberSet<void, never>
-  /** The grace period of a held turn whose background work is done (see releaseWhenSettled). */
-  readonly grace: FiberHandle.FiberHandle<void, never>
-  /** The runtime of the session's Letta conversation; none until the session has a conversation. */
-  attachment: Option.Option<Attachment>
-  /** Serializes creating the conversation with config changes made meanwhile. */
-  readonly setupLock: Semaphore.Semaphore
-  /** The client has the session's commands and config options (they went out with its setup). */
-  announced: boolean
-  /** Model, effort and mode. */
-  readonly settings: SessionSettings
-  commands: ReadonlyArray<Command>
-  readonly ownMessages: Set<string>
-  /** Runs of turns lacp ended itself; their late frames are ignored. */
-  readonly abandonedRuns: Set<string>
-  /** Background subagents that will report back (not silent): running in Letta's last snapshot, not yet reported. */
-  backgroundSubagents: ReadonlySet<string>
-  /** Reports of finished background work waiting in Letta's queue. */
-  queuedNotifications: number
-  /** The client's MCP servers this session was opened with. */
-  readonly mcpServers: ReadonlyArray<McpServerConfig>
-  turn: Option.Option<Turn.Turn>
-  foreground: "idle" | "running" | "requires_action"
-  readonly deviceStatus: Deferred.Deferred<void>
-  localCommand: boolean
-  /** Approval requests awaiting the client's answer. */
-  approvals: number
-  /** The client's MCP servers, bridged into Letta as external tools. */
-  readonly mcp: Bridge.McpBridge
 }
 
 // ---------------------------------------------------------------------------
@@ -216,17 +138,13 @@ export class Agent extends Context.Service<Agent, {
       const bridges = yield* Bridge.McpBridges
       const layerScope = yield* Effect.scope
       const sessions = new Map<string, Session>()
+      /** What the frame handlers (Frames.ts) need from here. */
+      const deps: Deps = { config, client }
 
       // A failing CSPRNG is not a recoverable condition.
       const uuid = crypto.randomUUIDv4().pipe(Effect.orDie)
 
       const connection = appServer.connection.pipe(Effect.mapError(unavailable))
-
-      const targetOf = (attachment: Attachment): Target => ({
-        connection: attachment.connection,
-        runtime: attachment.runtime,
-        conversationId: attachment.runtime.conversation_id
-      })
 
       const getSession = (sessionId: string) =>
         Effect.suspend(() => {
@@ -235,458 +153,13 @@ export class Agent extends Context.Service<Agent, {
         })
 
       const emit = (session: Session, event: SessionEvent) => client.emit(session.id, event)
-      const emitAll = (session: Session, events: ReadonlyArray<SessionEvent>) =>
-        Effect.forEach(events, (event) => emit(session, event), { discard: true })
-
-      const setForeground = (session: Session, state: "running" | "requires_action") =>
-        Effect.suspend(() => {
-          if (session.foreground === state) return Effect.void
-          session.foreground = state
-          return emit(session, { _tag: "State", state })
-        })
-
-      // --- turns ------------------------------------------------------------
-
-      /**
-       * Logs a step of the session's turn, with the time since the turn began.
-       * The log never holds prompts or tool input.
-       */
-      const logTurn = (session: Session, message: string, level: LogLevel.Severity = "Debug") =>
-        Effect.gen(function*() {
-          const now = yield* Clock.currentTimeMillis
-          const turn = Option.getOrUndefined(session.turn)
-          yield* Effect.logWithLevel(level)(message).pipe(Effect.annotateLogs({
-            session: session.id,
-            ...(turn === undefined
-              ? {}
-              : { turn: turn.clientMessageId, elapsed: Duration.format(Duration.millis(now - turn.began)) })
-          }))
-        })
-
-      /** Logs the turn's first output, once Letta runs it (until then, output is earlier work's). */
-      const noteOutput = (session: Session) =>
-        Effect.suspend(() => {
-          const turn = Option.getOrUndefined(session.turn)
-          if (turn === undefined || turn.streamed || !Turn.started(turn)) return Effect.void
-          turn.streamed = true
-          return logTurn(session, "First output from Letta")
-        })
-
-      /** Letta started the turn (see Turn.start). */
-      const startTurn = (session: Session, turn: Turn.Turn) =>
-        Effect.suspend(() => {
-          const queued = turn.phase._tag === "Queued"
-          Turn.start(turn)
-          return queued ? logTurn(session, "Letta started the queued prompt") : Effect.void
-        })
-
-      const completeTurn = Effect.fnUntraced(function*(session: Session, result: TurnResult) {
-        const ended = `${result.stopReason}${
-          Option.match(result.error, { onNone: () => "", onSome: (error) => ` (${error.message})` })
-        }`
-        yield* Option.isSome(session.turn)
-          ? logTurn(session, `The turn ended: ${ended}`, "Info")
-          : logTurn(session, `A turn Letta ran on its own ended: ${ended}`)
-        yield* emitAll(
-          session,
-          session.translator.finishTurn(
-            result.stopReason === "cancelled" ? "cancelled" : result.stopReason === "error" ? "error" : "end_turn"
-          )
-        )
-        session.foreground = "idle"
-        yield* emit(session, {
-          _tag: "State",
-          state: "idle",
-          stopReason: result.stopReason,
-          ...(Option.isSome(result.error) ? { error: result.error.value } : {})
-        })
-        const turn = session.turn
-        session.turn = Option.none()
-        session.localCommand = false
-        if (Option.isSome(turn)) {
-          session.ownMessages.delete(turn.value.clientMessageId)
-          yield* Deferred.succeed(turn.value.done, result)
-        }
-        yield* FiberSet.clear(session.permissions)
-        session.approvals = 0
-      })
-
-      const onTurnFinished = Effect.fnUntraced(function*(session: Session, frame: TurnFinished) {
-        // The late end of a turn lacp ended itself must not end the next one.
-        if (frame.run_id != null && session.abandonedRuns.has(frame.run_id)) return
-        const turn = session.turn
-        // Nothing is running, so this is the late end of a turn lacp ended before seeing any of its runs.
-        if (Option.isNone(turn) && session.foreground === "idle") return
-        if (Option.isSome(turn) && turn.value.phase._tag === "Submitted") {
-          turn.value.phase = Turn.Phase.Submitted({ ...turn.value.phase, early: Option.some(frame) })
-          return
-        }
-        // A turn that finished before ours was dequeued belongs to earlier (background) work.
-        if (Option.isSome(turn) && turn.value.phase._tag === "Queued") return
-        const stopReason = Translator.stopReasonOf(frame.stop_reason)
-        const message = frame.error ?? Option.getOrUndefined(Option.flatMap(turn, (t) => t.error))
-        if (frame.usage !== undefined && frame.usage !== null && Option.isSome(session.settings.contextWindow)) {
-          const used = frame.usage.context_tokens ?? frame.usage.prompt_tokens
-          if (used !== undefined && used !== null) {
-            yield* emit(session, { _tag: "Usage", used, size: session.settings.contextWindow.value })
-          }
-        }
-        const result: TurnResult = {
-          stopReason,
-          error: stopReason === "error"
-            ? Option.some({ code: -32603, message: message ?? `Letta Code stopped: ${frame.stop_reason}` })
-            : Option.none()
-        }
-        // A cancelled turn ends now, whatever is still running in the background.
-        if (stopReason !== "cancelled" && Option.isSome(turn) && awaitsBackground(session, turn.value)) {
-          if (turn.value.phase._tag !== "Held") {
-            yield* logTurn(session, "Keeping the turn open until its background work reports back", "Info")
-          }
-          turn.value.phase = Turn.Phase.Held({ result, followUp: false })
-          return
-        }
-        yield* completeTurn(session, result)
-      })
-
-      /** Whether a turn has background work outstanding that will report back into the conversation. */
-      const awaitsBackground = (session: Session, turn: Turn.Turn) =>
-        config.waitForBackground &&
-        (session.queuedNotifications > 0 ||
-          Array.from(session.backgroundSubagents).some((id) => !turn.preexisting.has(id)))
-
-      /** Whether `turn` still only waits for background work that is done. */
-      const settled = (session: Session, turn: Turn.Turn) =>
-        Option.exists(session.turn, (current) => current === turn) && Turn.waitingForBackground(turn) &&
-        !awaitsBackground(session, turn)
-
-      /**
-       * Ends a held turn once its background work is done. The report starts a
-       * follow-up turn, whose end ends the held turn; if none starts within the
-       * grace period (counted from the last sign that the work is done), the
-       * held result stands.
-       */
-      const releaseWhenSettled = (session: Session) =>
-        Effect.suspend(() => {
-          const turn = Option.getOrUndefined(session.turn)
-          if (turn === undefined || !settled(session, turn)) return Effect.void
-          return Effect.sleep(config.backgroundGrace).pipe(
-            Effect.andThen(Effect.suspend(() =>
-              settled(session, turn) && turn.phase._tag === "Held"
-                ? logTurn(
-                  session,
-                  `The background work is done and no follow-up turn started within ${
-                    Duration.format(config.backgroundGrace)
-                  }`
-                ).pipe(Effect.andThen(completeTurn(session, turn.phase.result)))
-                : Effect.void
-            )),
-            FiberHandle.run(session.grace),
-            Effect.asVoid
-          )
-        })
-
-      const decide = (decision: PermissionDecision) => {
-        if (decision._tag === "Cancelled") {
-          return { behavior: "deny" as const, message: "The user cancelled the request." }
-        }
-        if (decision.optionId === Translator.PERMISSION_REJECT) {
-          return { behavior: "deny" as const, message: "The user rejected this tool call." }
-        }
-        if (decision.optionId.startsWith(Translator.PERMISSION_ALWAYS_PREFIX)) {
-          return {
-            behavior: "allow" as const,
-            selected_permission_suggestion_ids: [decision.optionId.slice(Translator.PERMISSION_ALWAYS_PREFIX.length)]
-          }
-        }
-        return { behavior: "allow" as const }
-      }
-
-      const onControlRequest = Effect.fnUntraced(
-        function*(session: Session, attachment: Attachment, frame: ControlRequest) {
-          const { events, request } = session.translator.permission(frame.request)
-          const tool = frame.request.tool_name
-          yield* emitAll(session, events)
-          session.approvals += 1
-          yield* setForeground(session, "requires_action")
-          yield* logTurn(session, `Waiting for the client to approve ${tool}`)
-          yield* client.requestPermission(session.id, request).pipe(
-            Effect.flatMap((decision) => {
-              const answer = decide(decision)
-              return logTurn(session, `The client answered the approval for ${tool}: ${answer.behavior}`).pipe(
-                Effect.andThen(attachment.connection.send({
-                  type: "input",
-                  runtime: attachment.runtime,
-                  payload: { kind: "approval_response", request_id: frame.request_id, decision: answer }
-                }))
-              )
-            }),
-            Effect.catch((error) => Effect.logWarning(`Could not answer a Letta approval: ${error.message}`)),
-            Effect.ensuring(Effect.sync(() => {
-              session.approvals = Math.max(0, session.approvals - 1)
-            })),
-            Effect.andThen(
-              Effect.suspend(() =>
-                Option.isSome(session.turn) && session.approvals === 0 ? setForeground(session, "running") : Effect.void
-              )
-            ),
-            FiberSet.run(session.permissions)
-          )
-        }
-      )
-
-      const onDelta = Effect.fnUntraced(function*(session: Session, frame: StreamDelta) {
-        // Subagent streams are summarised by their parent tool call.
-        if (frame.subagent_id !== undefined && frame.subagent_id !== null) return
-        const run = Option.map(decodeDeltaRun(frame.delta), (d) => d.run_id)
-        // Output of a turn lacp already ended (a cancel Letta never confirmed) is dropped.
-        if (Option.isSome(run) && session.abandonedRuns.has(run.value)) return
-        if (Option.isSome(run) && Option.isSome(session.turn)) session.turn.value.runs.add(run.value)
-        if (Option.isSome(session.turn) && Turn.waitingForBackground(session.turn.value)) {
-          session.turn.value.phase = Turn.Phase.Held({ ...session.turn.value.phase, followUp: true })
-          yield* logTurn(session, "The background work reported back; following Letta's follow-up turn")
-        }
-        for (const item of session.translator.delta(frame.delta)) {
-          switch (item._tag) {
-            case "SubagentsReported": {
-              // The report is the reliable end of a subagent: once the turn that started it
-              // has ended, Letta Code may never send the subagent's final state.
-              const outstanding = new Set(session.backgroundSubagents)
-              for (const id of item.subagentIds) outstanding.delete(id)
-              session.backgroundSubagents = outstanding
-              continue
-            }
-            case "UserEcho": {
-              const own = Option.isSome(item.otid) && session.ownMessages.has(item.otid.value)
-              if (own) {
-                if (
-                  Option.isSome(session.turn) &&
-                  session.turn.value.clientMessageId === Option.getOrUndefined(item.otid)
-                ) {
-                  yield* startTurn(session, session.turn.value)
-                }
-                continue
-              }
-              yield* setForeground(session, "running")
-              yield* emit(session, item.event)
-              continue
-            }
-            case "LoopError": {
-              const turn = session.turn
-              if (!item.terminal || Option.isNone(turn)) {
-                yield* emit(session, { _tag: "Notice", severity: "warning", title: item.message })
-                continue
-              }
-              turn.value.error = Option.some(item.message)
-              if (!Turn.started(turn.value) && item.clientMessageIds.includes(turn.value.clientMessageId)) {
-                yield* completeTurn(session, {
-                  stopReason: "error",
-                  error: Option.some({ code: -32603, message: item.message })
-                })
-              }
-              continue
-            }
-            case "Event": {
-              if (
-                session.localCommand && item.event._tag === "AgentMessageChunk" &&
-                item.event.messageId.startsWith("command-")
-              ) {
-                continue
-              }
-              if (item.event._tag !== "Usage" && item.event._tag !== "Notice") {
-                yield* setForeground(session, "running")
-                yield* noteOutput(session)
-              }
-              yield* emit(session, item.event)
-            }
-          }
-        }
-      })
-
-      /** Runs a bridged MCP tool for Letta and returns its result. */
-      const onExternalToolCall = (session: Session, attachment: Attachment, frame: ExternalToolCallRequest) =>
-        session.mcp.call(frame.tool_name, frame.input).pipe(
-          Effect.flatMap((result) =>
-            attachment.connection.send({ type: "external_tool_call_response", request_id: frame.request_id, result })
-          ),
-          Effect.catch((error) => Effect.logWarning(`Could not return an MCP tool result to Letta: ${error.message}`)),
-          Effect.forkIn(session.scope),
-          Effect.asVoid
-        )
-
-      /** Re-registers the bridged tools after an MCP server's tool list changed. */
-      const updateTools = Effect.fnUntraced(function*(session: Session) {
-        if (Option.isNone(session.attachment)) return
-        const { connection: conn, runtime } = session.attachment.value
-        if (conn.info.capabilities?.["runtime_external_tools_update"] !== true) {
-          yield* Effect.logWarning("This Letta Code cannot update MCP tools live; they refresh on the next session")
-          return
-        }
-        const tools = yield* session.mcp.tools
-        yield* conn.call(
-          (request_id) => ({
-            type: "runtime_external_tools_update",
-            request_id,
-            updates: [{ runtimes: [runtime], external_tools: [{ tools }] }]
-          }),
-          RuntimeExternalToolsUpdateResponse
-        ).pipe(Effect.catch((error) => Effect.logWarning(`Could not update MCP tools: ${error.message}`)))
-      })
-
-      const onDeviceStatus = Effect.fnUntraced(function*(session: Session, frame: DeviceStatus) {
-        const status = frame.device_status
-        const before = configOptions(session.settings)
-        const mode = Option.flatMap(Option.fromUndefinedOr(status.current_permission_mode), decodePermissionMode)
-        if (Option.isSome(mode)) session.settings.mode = mode
-        const commands = Commands.fromDeviceStatus(status)
-        const commandsChanged = !Equal.equals(commands, session.commands)
-        session.commands = commands
-        const firstReport = !(yield* Deferred.isDone(session.deviceStatus))
-        yield* Deferred.succeed(session.deviceStatus, undefined)
-        // A session's first report goes out with its setup, unless the client already has the setup.
-        if (firstReport && !session.announced) return
-        if (commandsChanged) yield* emit(session, { _tag: "AvailableCommands", commands })
-        const after = configOptions(session.settings)
-        if (!Equal.equals(before, after)) yield* emit(session, { _tag: "ConfigOptions", options: after })
-      })
-
-      const onLoopStatus = (session: Session, frame: LoopStatus) =>
-        Effect.suspend(() =>
-          // `requires_action` is driven by approval requests themselves; loop status
-          // frames can lag behind an answer and must not re-block the session.
-          frame.loop_status.status !== "WAITING_ON_APPROVAL" && frame.loop_status.status !== "WAITING_ON_INPUT" &&
-            Option.isSome(session.turn) && session.approvals === 0
-            ? setForeground(session, "running")
-            : Effect.void
-        )
-
-      const onSubagentState = (session: Session, frame: SubagentState) =>
-        Effect.suspend(() => {
-          session.backgroundSubagents = new Set(
-            frame.subagents
-              .filter((a) =>
-                a.is_background === true && a.silent !== true && (a.status === "pending" || a.status === "running")
-              )
-              .map((a) => a.subagent_id)
-          )
-          return releaseWhenSettled(session)
-        })
-
-      const onQueueUpdate = Effect.fnUntraced(function*(session: Session, frame: QueueUpdate) {
-        if (frame.queue !== undefined) {
-          session.queuedNotifications = frame.queue.filter((item) => item.kind === "task_notification").length
-          yield* releaseWhenSettled(session)
-        }
-        const turn = session.turn
-        if (Option.isNone(turn)) return
-        for (const removed of frame.removed ?? []) {
-          if (removed.client_message_id !== turn.value.clientMessageId) continue
-          if (removed.disposition === "dequeued") yield* startTurn(session, turn.value)
-          if (removed.disposition === "cancelled") {
-            yield* completeTurn(session, { stopReason: "cancelled", error: Option.none() })
-          }
-        }
-      })
-
-      /** Handles a runtime's frames for a session. */
-      const route = (session: Session, attachment: Attachment): (frame: RuntimeFrame) => Effect.Effect<void> =>
-        Match.type<RuntimeFrame>().pipe(
-          Match.discriminatorsExhaustive("type")({
-            stream_delta: (frame) => onDelta(session, frame),
-            turn_finished: (frame) => onTurnFinished(session, frame),
-            control_request: (frame) => onControlRequest(session, attachment, frame),
-            update_loop_status: (frame) => onLoopStatus(session, frame),
-            update_device_status: (frame) => onDeviceStatus(session, frame),
-            external_tool_call_request: (frame) => onExternalToolCall(session, attachment, frame),
-            update_subagent_state: (frame) => onSubagentState(session, frame),
-            update_queue: (frame) => onQueueUpdate(session, frame)
-          })
-        )
-
-      /** Routes this runtime's frames from the subscription into the session; other frames are ignored. */
-      const consume = (session: Session, attachment: Attachment, subscription: PubSub.Subscription<Frame>) => {
-        const handle = route(session, attachment)
-        return PubSub.take(subscription).pipe(
-          Effect.flatMap((frame) =>
-            (frame.header.runtime?.conversation_id ?? frame.header.conversation_id) ===
-                attachment.runtime.conversation_id
-              ? Option.match(decodeRuntimeFrame(frame.raw), { onNone: () => Effect.void, onSome: handle }).pipe(
-                Effect.catchCause((cause) =>
-                  Effect.logError(`Failed to handle a Letta ${frame.header.type} frame`, cause)
-                )
-              )
-              : Effect.void
-          ),
-          Effect.forever
-        )
-      }
-
-      /** Ends the active turn with an error if the connection drops. */
-      const watch = (session: Session, attachment: Attachment) =>
-        attachment.connection.closed.pipe(
-          Effect.catch((error) =>
-            Option.isSome(session.turn)
-              ? completeTurn(session, {
-                stopReason: "error",
-                error: Option.some({ code: -32603, message: error.message })
-              })
-              : Effect.void
-          )
-        )
 
       // --- runtimes ---------------------------------------------------------
-
-      interface RuntimeTarget {
-        readonly agentId: string
-        readonly conversationId: Option.Option<string>
-        readonly cwd: string
-        readonly tools: ReadonlyArray<ExternalToolDefinition>
-        readonly mode: Option.Option<PermissionMode>
-      }
-
-      /**
-       * Starts a runtime in a new scope and subscribes to its frames (before
-       * `runtime_start`, so nothing is missed). The scope is closed again if
-       * starting fails or is interrupted.
-       */
-      const startRuntime = Effect.fnUntraced(
-        function*(conn: LettaConnection, parent: Scope.Scope, target: RuntimeTarget) {
-          const scope = yield* Scope.fork(parent)
-          return yield* Effect.gen(function*() {
-            const subscription = yield* Scope.provide(conn.subscribe, scope)
-            const response = yield* conn.call(
-              (request_id) => ({
-                type: "runtime_start",
-                request_id,
-                agent_id: target.agentId,
-                ...(Option.isSome(target.conversationId)
-                  ? { conversation_id: target.conversationId.value }
-                  : { create_conversation: { body: {} } }),
-                cwd: target.cwd,
-                ...(Option.isSome(target.mode) ? { mode: target.mode.value } : {}),
-                client_info: { name: AGENT_NAME, title: AGENT_TITLE, version: VERSION },
-                recover_approvals: true,
-                force_device_status: true,
-                wait_for_replay: true,
-                ...(target.tools.length > 0 ? { external_tools: [{ tools: target.tools }] } : {})
-              }),
-              RuntimeStartResponse,
-              { timeout: "2 minutes" }
-            ).pipe(Effect.mapError(unavailable))
-            if (response.runtime === null) {
-              return yield* new AgentUnavailable({
-                message: response.error ?? "Letta Code did not start a runtime",
-                auth: false
-              })
-            }
-            return { scope, subscription, response, runtime: response.runtime }
-          }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
-        }
-      )
 
       /** Makes a started runtime the session's attachment (closing the previous one) and starts routing its frames. */
       const attach = Effect.fnUntraced(function*(
         session: Session,
-        started: Effect.Success<ReturnType<typeof startRuntime>>,
+        started: StartedRuntime,
         conn: LettaConnection
       ) {
         if (Option.isSome(session.attachment)) yield* Scope.close(session.attachment.value.scope, Exit.void)
@@ -697,11 +170,11 @@ export class Agent extends Context.Service<Agent, {
           runtime: started.runtime
         }
         session.attachment = Option.some(attachment)
-        yield* consume(session, attachment, started.subscription).pipe(
+        yield* consume(deps, session, attachment, started.subscription).pipe(
           Effect.annotateLogs("session", session.id),
           Effect.forkIn(started.scope)
         )
-        yield* watch(session, attachment).pipe(Effect.forkIn(started.scope))
+        yield* watch(deps, session, attachment).pipe(Effect.forkIn(started.scope))
         return attachment
       })
 
@@ -732,60 +205,7 @@ export class Agent extends Context.Service<Agent, {
         return attachment
       })
 
-      interface SessionInput {
-        readonly id: string
-        readonly agentId: Option.Option<string>
-        readonly cwd: string
-        readonly scope: Scope.Closeable
-        readonly mcp: Bridge.McpBridge
-        readonly mcpServers: ReadonlyArray<McpServerConfig>
-        readonly settings: SessionSettings
-        readonly commands: ReadonlyArray<Command>
-      }
-
-      /** What a session's translators need: its directory, its model's context window and its MCP tools. */
-      const translatorContext = (
-        cwd: string,
-        settings: SessionSettings,
-        mcp: Bridge.McpBridge
-      ): Translator.TranslatorContext => ({
-        cwd,
-        path,
-        contextWindow: () => settings.contextWindow,
-        externalTool: (name) => mcp.describe(name)
-      })
-
-      const makeSession = Effect.fnUntraced(function*(input: SessionInput) {
-        const session: Session = {
-          id: input.id,
-          agentId: input.agentId,
-          cwd: input.cwd,
-          scope: input.scope,
-          translator: Translator.make(translatorContext(input.cwd, input.settings, input.mcp)),
-          turnLock: yield* Semaphore.make(1),
-          permissions: yield* Scope.provide(FiberSet.make<void, never>(), input.scope),
-          grace: yield* Scope.provide(FiberHandle.make<void, never>(), input.scope),
-          attachment: Option.none(),
-          setupLock: yield* Semaphore.make(1),
-          announced: false,
-          settings: input.settings,
-          commands: input.commands,
-          ownMessages: new Set(),
-          abandonedRuns: new Set(),
-          backgroundSubagents: new Set(),
-          queuedNotifications: 0,
-          mcpServers: input.mcpServers,
-          turn: Option.none(),
-          foreground: "idle",
-          deviceStatus: yield* Deferred.make<void>(),
-          localCommand: false,
-          approvals: 0,
-          mcp: input.mcp
-        }
-        sessions.set(session.id, session)
-        yield* input.mcp.changes.pipe(Stream.runForEach(() => updateTools(session)), Effect.forkIn(input.scope))
-        return session
-      })
+      // --- opening sessions -------------------------------------------------
 
       /**
        * Opens a session in a new scope: Letta and the client's MCP servers
@@ -850,8 +270,6 @@ export class Agent extends Context.Service<Agent, {
         } satisfies SessionSetup
       })
 
-      // --- history ----------------------------------------------------------
-
       /** Emits the conversation's history (its latest 1,000 messages), oldest first. */
       const replay = Effect.fnUntraced(function*(session: Session, conn: LettaConnection, conversationId: string) {
         const pages = yield* History.pages(conn, conversationId).pipe(
@@ -859,12 +277,10 @@ export class Agent extends Context.Service<Agent, {
           Stream.runCollect,
           Effect.mapError(unavailable)
         )
-        const history = Translator.make(translatorContext(session.cwd, session.settings, session.mcp))
-        for (const row of pages.flat().toReversed()) yield* emitAll(session, history.history(row))
-        yield* emitAll(session, history.finishTurn("end_turn"))
+        const history = Translator.make(translatorContext(path, session.cwd, session.settings, session.mcp))
+        for (const row of pages.flat().toReversed()) yield* emitAll(deps, session, history.history(row))
+        yield* emitAll(deps, session, history.finishTurn("end_turn"))
       })
-
-      // --- operations -------------------------------------------------------
 
       /**
        * Opens a session that has no Letta conversation yet, without touching
@@ -898,8 +314,10 @@ export class Agent extends Context.Service<Agent, {
                 models,
                 Option.orElse(config.permissionMode, () => Option.some(DEFAULT_PERMISSION_MODE))
               ),
-              commands: Commands.builtins
+              commands: Commands.builtins,
+              path
             })
+            sessions.set(session.id, session)
             yield* settings.preferConfiguredModel(session.settings)
             return session
           }))
@@ -957,6 +375,22 @@ export class Agent extends Context.Service<Agent, {
         return attachment
       })
 
+      /** The stored conversation behind a session, and its agent. */
+      const storedConversation = Effect.fnUntraced(
+        function*(conn: LettaConnection, sessionId: string, conversationId: string, cwd: string) {
+          const notFound = new SessionNotFound({ sessionId })
+          const retrieved = yield* conn.call(
+            (request_id) => ({ type: "conversation_retrieve", request_id, conversation_id: conversationId }),
+            ConversationRetrieveResponse
+          ).pipe(Effect.mapError(() => notFound))
+          const conversation = retrieved.conversation
+          if (conversation === null) return yield* notFound
+          const agentId = conversation.agent_id ?? Option.getOrUndefined(yield* agents.find(conn, cwd))
+          if (agentId === undefined) return yield* notFound
+          return { agentId, conversation }
+        }
+      )
+
       /**
        * Opens a session on a stored conversation in a new scope: Letta and the
        * client's MCP servers connect concurrently, then the runtime starts with
@@ -988,12 +422,16 @@ export class Agent extends Context.Service<Agent, {
               mcp,
               mcpServers: input.mcpServers,
               settings: initialSettings(started.response, yield* settings.catalog(conn), config.permissionMode),
-              commands: []
+              commands: [],
+              path
             })
+            sessions.set(session.id, session)
             if (input.replay) yield* replay(session, conn, input.conversationId)
             yield* settle(session, yield* attach(session, started, conn))
             return { session, conversation: stored.conversation }
           }))
+
+      // --- operations -------------------------------------------------------
 
       const newSession = Effect.fn("Agent.newSession")(function*(input: {
         readonly cwd: string
@@ -1009,22 +447,6 @@ export class Agent extends Context.Service<Agent, {
         )
         return yield* publish(session)
       })
-
-      /** The stored conversation behind a session, and its agent. */
-      const storedConversation = Effect.fnUntraced(
-        function*(conn: LettaConnection, sessionId: string, conversationId: string, cwd: string) {
-          const notFound = new SessionNotFound({ sessionId })
-          const retrieved = yield* conn.call(
-            (request_id) => ({ type: "conversation_retrieve", request_id, conversation_id: conversationId }),
-            ConversationRetrieveResponse
-          ).pipe(Effect.mapError(() => notFound))
-          const conversation = retrieved.conversation
-          if (conversation === null) return yield* notFound
-          const agentId = conversation.agent_id ?? Option.getOrUndefined(yield* agents.find(conn, cwd))
-          if (agentId === undefined) return yield* notFound
-          return { agentId, conversation }
-        }
-      )
 
       const loadSession = Effect.fn("Agent.loadSession")(function*(input: {
         readonly sessionId: string
@@ -1159,7 +581,7 @@ export class Agent extends Context.Service<Agent, {
         session.localCommand = true
         yield* logTurn(session, `Running the /${command.name} command`)
         yield* emit(session, { _tag: "UserMessage", messageId, content: prompt })
-        yield* setForeground(session, "running")
+        yield* setForeground(deps, session, "running")
         const handle = yield* handleOf(session, turn, release)
         yield* Effect.gen(function*() {
           const result = yield* attachment.connection.call(
@@ -1180,6 +602,7 @@ export class Agent extends Context.Service<Agent, {
             yield* emit(session, { _tag: "AgentMessageChunk", messageId: yield* uuid, content: Content.text(output) })
           }
           yield* completeTurn(
+            deps,
             session,
             result._tag === "Success"
               ? { stopReason: "end_turn", error: Option.none() }
@@ -1240,9 +663,9 @@ export class Agent extends Context.Service<Agent, {
             turn.phase._tag === "Queued" ? "Letta queued the prompt behind earlier work" : "Letta accepted the prompt"
           )
           yield* emit(session, { _tag: "UserMessage", messageId: clientMessageId, content: blocks })
-          yield* setForeground(session, "running")
+          yield* setForeground(deps, session, "running")
           // With nothing ahead of it in Letta's queue, an early turn_finished can only be ours.
-          if (Option.isSome(early) && Turn.started(turn)) yield* onTurnFinished(session, early.value)
+          if (Option.isSome(early) && Turn.started(turn)) yield* onTurnFinished(deps, session, early.value)
           return yield* handleOf(session, turn, release)
         }).pipe(Effect.onError(() => release))
       })
@@ -1253,7 +676,7 @@ export class Agent extends Context.Service<Agent, {
         const turn = session.turn.value
         // Only waiting for background work: stop waiting (the work itself carries on in Letta).
         if (Turn.waitingForBackground(turn)) {
-          yield* completeTurn(session, { stopReason: "cancelled", error: Option.none() })
+          yield* completeTurn(deps, session, { stopReason: "cancelled", error: Option.none() })
           return
         }
         /** Ends the turn without waiting for Letta to report its end, dropping the turn's late output. */
@@ -1262,7 +685,7 @@ export class Agent extends Context.Service<Agent, {
             Option.isSome(session.turn) && session.turn.value === turn
               ? logTurn(session, reason).pipe(
                 Effect.andThen(Effect.sync(() => turn.runs.forEach((run) => session.abandonedRuns.add(run)))),
-                Effect.andThen(completeTurn(session, { stopReason: "cancelled", error: Option.none() }))
+                Effect.andThen(completeTurn(deps, session, { stopReason: "cancelled", error: Option.none() }))
               )
               : Effect.void
           )
@@ -1315,7 +738,7 @@ export class Agent extends Context.Service<Agent, {
           yield* cancel(sessionId)
           yield* Deferred.await(done).pipe(Effect.timeoutOption("5 seconds"))
           if (Option.isSome(session.turn)) {
-            yield* completeTurn(session, { stopReason: "cancelled", error: Option.none() })
+            yield* completeTurn(deps, session, { stopReason: "cancelled", error: Option.none() })
           }
         }
         sessions.delete(sessionId)
