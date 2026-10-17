@@ -2,7 +2,10 @@
  * Which Letta agent a session talks to: the configured one (`LETTA_AGENT_ID`),
  * else the one the host's Letta Code last used in the session's directory (as
  * `letta` itself would pick it), else, where a session needs one, a new one.
- * The choice is remembered per directory for the life of the process.
+ * The choice is remembered per directory for the life of the process, and a
+ * new agent also in the directory's `.letta/settings.local.json`, as Letta
+ * Code records the agents it creates, so later sessions (and `letta`) there
+ * keep talking to it.
  */
 import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
 import { LacpConfig } from "../Config.ts"
@@ -21,6 +24,11 @@ type HostSettings = typeof HostSettings.Type
 const decodeHostSettings = Schema.decodeUnknownOption(Schema.fromJsonString(HostSettings))
 
 const lastAgent = (settings: HostSettings) => Option.toArray(Option.fromNullishOr(settings.lastAgent))
+
+/** A settings file as a JSON object, to update one key and keep the others. */
+const decodeSettingsObject = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
+)
 
 export class AgentResolver extends Context.Service<AgentResolver, {
   /** The configured agent, or the host's last-used one for `cwd` that still exists. */
@@ -82,6 +90,34 @@ export class AgentResolver extends Context.Service<AgentResolver, {
         return found
       })
 
+      /** Records `agentId` as the last agent of the project at `cwd`, keeping its other settings. */
+      const remember = (cwd: string, agentId: string) =>
+        Effect.gen(function*() {
+          const dir = path.join(cwd, ".letta")
+          const file = path.join(dir, "settings.local.json")
+          const existing = yield* fs.readFileString(file).pipe(
+            Effect.asSome,
+            Effect.catchTag("PlatformError", (error) =>
+              error.reason._tag === "NotFound" ? Effect.succeedNone : Effect.fail(error))
+          )
+          const settings = Option.match(existing, {
+            onNone: () =>
+              Option.some({}),
+            onSome: decodeSettingsObject
+          })
+          yield* Option.match(settings, {
+            onNone: () => Effect.logWarning(`Not recording agent ${agentId} in ${file}: it is not a JSON object`),
+            onSome: (settings) =>
+              fs.makeDirectory(dir, { recursive: true }).pipe(
+                Effect.andThen(
+                  fs.writeFileString(file, `${JSON.stringify({ ...settings, lastAgent: agentId }, null, 2)}\n`)
+                )
+              )
+          })
+        }).pipe(
+          Effect.catch((error) => Effect.logWarning(`Could not record agent ${agentId} for ${cwd}: ${error.message}`))
+        )
+
       const create = Effect.fnUntraced(function*(conn: LettaConnection, cwd: string) {
         const created = yield* conn.call(
           (request_id) => ({
@@ -101,8 +137,9 @@ export class AgentResolver extends Context.Service<AgentResolver, {
           })
         }
         byCwd.set(cwd, created.agent_id)
+        yield* remember(cwd, created.agent_id)
         yield* Effect.logWarning(
-          `Created Letta agent ${created.agent_id}. Set LETTA_AGENT_ID=${created.agent_id} to keep talking to it.`
+          `Created Letta agent ${created.agent_id} for ${cwd}, recorded in its .letta/settings.local.json.`
         )
         return created.agent_id
       })

@@ -45,6 +45,34 @@ describe("Models.catalog", () => {
     assert.deepStrictEqual(byok?.levels, ["minimal", "low", "high"])
     assert.deepStrictEqual(byok?.presets, [])
   })
+
+  it("offers a model on the user's own provider the levels of the same hosted model", () => {
+    const grok = (effort: string) =>
+      entry(`grok-4.7-${effort}`, "xai/grok-4.7", { reasoning_effort: effort, context_window: 500_000 })
+    // Letta copies the hosted model's first preset onto the entry, so `reasoning_effort` selects nothing.
+    const own = entry("lc-xai/grok-4.7", "lc-xai/grok-4.7", {
+      reasoning_effort: "low",
+      context_window: 500_000,
+      provider_type: "xai"
+    })
+    const choices = Models.catalog([grok("low"), grok("medium"), grok("high"), own], [
+      { id: "lc-xai/grok-4.7", handle: "lc-xai/grok-4.7", context_window_limit: 500_000, reasoning_levels: [] }
+    ])
+    const byok = choices.find((c) => c.handle === "lc-xai/grok-4.7")
+    assert.deepStrictEqual(byok?.levels, ["low", "medium", "high"])
+    assert.deepStrictEqual(byok?.presets, [])
+  })
+
+  it("picks the model Letta Code gives new agents: auto, else the default, else the first", () => {
+    const auto = { ...entry("auto", "letta/auto"), isDefault: false }
+    const marked = { ...entry("opus", "anthropic/claude-opus"), isDefault: true }
+    const plain = entry("sonnet", "anthropic/claude-sonnet")
+    const handle = (entries: ReadonlyArray<ModelEntry>) =>
+      Option.map(Models.defaultChoice(Models.catalog(entries)), (c) => c.handle)
+    assert.deepStrictEqual(handle([plain, marked, auto]), Option.some("letta/auto"))
+    assert.deepStrictEqual(handle([plain, marked]), Option.some("anthropic/claude-opus"))
+    assert.deepStrictEqual(handle([plain]), Option.some("anthropic/claude-sonnet"))
+  })
 })
 
 describe("Models helpers", () => {
@@ -64,6 +92,27 @@ describe("Models helpers", () => {
       assert.strictEqual(Models.selectionId(choice, Option.some("xhigh")), "opus-medium-200000")
       assert.strictEqual(Models.selectionId(choice, Option.none()), "opus-medium-200000")
     }
+  })
+
+  it("finds the level closest to an asked one, the lower between two", () => {
+    const choice = Models.catalog([opus("low"), opus("high")]).at(0)
+    assert.isDefined(choice)
+    if (choice !== undefined) {
+      const nearest = (effort: Models.Effort) => Models.nearestLevel(choice, effort)
+      assert.deepStrictEqual(nearest("high"), Option.some("high"))
+      assert.deepStrictEqual(nearest("max"), Option.some("high"))
+      assert.deepStrictEqual(nearest("none"), Option.some("low"))
+      assert.deepStrictEqual(nearest("medium"), Option.some("low"))
+    }
+  })
+
+  it("changes the effort wherever the provider keeps it", () => {
+    assert.deepStrictEqual(
+      Models.withEffort({ provider_type: "xai", reasoning: { reasoning_effort: "high" }, temperature: 0.7 }, "low"),
+      { provider_type: "xai", reasoning: { reasoning_effort: "low" }, temperature: 0.7 }
+    )
+    assert.deepStrictEqual(Models.withEffort({ effort: "high" }, "max"), { effort: "max" })
+    assert.deepStrictEqual(Models.withEffort({}, "medium"), { reasoning: { reasoning_effort: "medium" } })
   })
 
   it("finds the choice for a handle and context window", () => {

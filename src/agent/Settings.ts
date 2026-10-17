@@ -13,7 +13,9 @@ import type { ConfigOption } from "../domain/Events.ts"
 import { LettaAppServer, type LettaConnection } from "../letta/AppServer.ts"
 import * as Models from "../letta/Models.ts"
 import {
+  ConversationModelSettingsResponse,
   ConversationRetrieveResponse,
+  ConversationUpdateResponse,
   ListModelsResponse,
   type ModelSettings,
   type PermissionMode,
@@ -26,7 +28,10 @@ import { type AgentUnavailable, configFailure, InvalidConfigValue, unavailable }
 
 export const MODE_CONFIG_ID = "mode"
 export const MODEL_CONFIG_ID = "model"
-export const EFFORT_CONFIG_ID = "effort"
+/** The id JetBrains Air (and Zed's own agent) use for reasoning effort; Air looks the option up by it. */
+export const EFFORT_CONFIG_ID = "reasoning_effort"
+/** The effort option's earlier id, which clients may still send for threads they saved. */
+const LEGACY_EFFORT_CONFIG_ID = "effort"
 
 const MODES: ReadonlyArray<{ readonly value: PermissionMode; readonly name: string; readonly description: string }> = [
   { value: "standard", name: "Standard", description: "Ask before running tools that change files or run commands" },
@@ -76,27 +81,56 @@ export const initialSettings = (
 const currentChoice = (settings: SessionSettings) =>
   Option.flatMap(settings.model, (handle) => Models.findChoice(settings.models, handle, settings.contextWindow))
 
-/** Model, effort (when the model has levels to choose from) and mode, in that order. */
+/**
+ * The model a session shows: its own, or, before Letta has recorded one (a
+ * session whose agent the first prompt creates), the one Letta Code gives
+ * new agents.
+ */
+const shownChoice = (settings: SessionSettings) =>
+  Option.isSome(settings.model) ? currentChoice(settings) : Models.defaultChoice(settings.models)
+
+/** The levels a model offers to choose from: none when it has a single one. */
+const choosable = (levels: ReadonlyArray<Models.Effort>) => levels.length > 1 ? levels : []
+
+/** The effort the session shows, which its new conversation gets unless another is chosen. */
+const shownEffort = (settings: SessionSettings) =>
+  Option.fromUndefinedOr(
+    Option.match(shownChoice(settings), {
+      onNone: () => undefined,
+      onSome: (choice) => Models.shownEffort(choosable(choice.levels), settings.effort)
+    })
+  )
+
+/**
+ * Model, effort and mode, in that order. Effort lists the levels of the
+ * session's model, and those of every model for clients that show one
+ * session's options for all models; it is left out when neither has levels
+ * to choose from.
+ */
 export const configOptions = (settings: SessionSettings): ReadonlyArray<ConfigOption> => {
   const options: Array<ConfigOption> = []
-  const choice = currentChoice(settings)
+  const choice = shownChoice(settings)
   if (Option.isSome(settings.model) || settings.models.length > 0) {
     const current = Option.match(choice, {
       onSome: (c) => c.key,
-      onNone: () => Option.getOrElse(settings.model, () => settings.models[0]?.key ?? "")
+      onNone: () => Option.getOrElse(settings.model, () => "")
     })
     const choices = Models.modelChoices(settings.models)
     if (!choices.some((c) => c.value === current)) choices.unshift({ value: current, name: current })
     options.push({ id: MODEL_CONFIG_ID, name: "Model", category: "model", currentValue: current, options: choices })
   }
-  if (Option.isSome(choice) && choice.value.levels.length > 1) {
+  const levels = choosable(Option.match(choice, { onNone: () => [], onSome: (c) => c.levels }))
+  const everyLevel = choosable(Models.allLevels(settings.models))
+  if (levels.length > 0 || everyLevel.length > 0) {
     options.push({
       id: EFFORT_CONFIG_ID,
       name: "Effort",
       description: "How much the model reasons before it answers",
       category: "thought_level",
-      currentValue: Models.shownEffort(choice.value, settings.effort) ?? "",
-      options: Models.effortChoices(choice.value)
+      currentValue: Models.shownEffort(levels, settings.effort) ?? Models.shownEffort(everyLevel, settings.effort) ??
+        "",
+      options: Models.effortChoices(levels),
+      everyModelOptions: Models.effortChoices(everyLevel)
     })
   }
   options.push({
@@ -114,7 +148,12 @@ export const configOptions = (settings: SessionSettings): ReadonlyArray<ConfigOp
 type Change =
   | { readonly _tag: "Mode"; readonly mode: PermissionMode }
   | { readonly _tag: "Model"; readonly choice: Models.ModelChoice }
-  | { readonly _tag: "Effort"; readonly choice: Models.ModelChoice; readonly effort: Models.Effort }
+  | {
+    readonly _tag: "Effort"
+    /** The session's model, if it has levels; `effort` is then the one of its levels closest to the asked one. */
+    readonly choice: Option.Option<Models.ModelChoice>
+    readonly effort: Models.Effort
+  }
 
 /** The change `value` makes to option `configId`, if the session's models allow it. */
 const parseChange = (settings: SessionSettings, configId: string, value: string): Option.Option<Change> => {
@@ -124,10 +163,15 @@ const parseChange = (settings: SessionSettings, configId: string, value: string)
     case MODEL_CONFIG_ID:
       return Option.map(Models.choiceFor(settings.models, value), (choice) => ({ _tag: "Model", choice }))
     case EFFORT_CONFIG_ID:
-      return Option.all({ choice: currentChoice(settings), effort: Models.decodeEffort(value) }).pipe(
-        Option.filter(({ choice, effort }) => choice.levels.includes(effort)),
-        Option.map(({ choice, effort }) => ({ _tag: "Effort", choice, effort }))
-      )
+    case LEGACY_EFFORT_CONFIG_ID:
+      return Option.map(Models.decodeEffort(value), (asked): Change => {
+        const choice = Option.filter(shownChoice(settings), (c) => choosable(c.levels).length > 0)
+        return {
+          _tag: "Effort",
+          choice,
+          effort: Option.getOrElse(Option.flatMap(choice, (c) => Models.nearestLevel(c, asked)), () => asked)
+        }
+      })
     default:
       return Option.none()
   }
@@ -223,9 +267,40 @@ export class Settings extends Context.Service<Settings, {
         )
 
       /**
+       * Sets the effort of a model whose levels are the hosted model's in the
+       * conversation's model settings, as Letta Code's own effort cycle does:
+       * `letta model set` refuses the levels such a model does not advertise.
+       */
+      const updateEffortSetting = Effect.fnUntraced(function*(
+        settings: SessionSettings,
+        target: Target,
+        choice: Models.ModelChoice,
+        effort: Models.Effort
+      ) {
+        const current = yield* target.connection.call(
+          (request_id) => ({ type: "conversation_retrieve", request_id, conversation_id: target.conversationId }),
+          ConversationModelSettingsResponse
+        )
+        const updated = yield* target.connection.call(
+          (request_id) => ({
+            type: "conversation_update",
+            request_id,
+            conversation_id: target.conversationId,
+            body: {
+              model: choice.handle,
+              model_settings: Models.withEffort(current.conversation?.model_settings ?? {}, effort)
+            }
+          }),
+          ConversationUpdateResponse
+        )
+        record(settings, Option.none(), updated.conversation?.model_settings)
+      })
+
+      /**
        * Sets the effort of the session's model: through its preset when it has
-       * one, otherwise with `letta model set --reasoning`, read back from the
-       * conversation.
+       * one, in the conversation's model settings when its levels are the
+       * hosted model's, otherwise with `letta model set --reasoning`, read back
+       * from the conversation.
        */
       const applyEffort = Effect.fnUntraced(function*(
         settings: SessionSettings,
@@ -239,6 +314,10 @@ export class Settings extends Context.Service<Settings, {
           record(settings, Option.some(response.model_handle ?? choice.handle), response.model_settings)
           return
         }
+        if (choice.hostedLevels) {
+          yield* updateEffortSetting(settings, target, choice, effort)
+          return
+        }
         yield* appServer.cli(["model", "set", "--conversation", target.conversationId, "--reasoning", effort]).pipe(
           Effect.tapError((error) => Effect.logWarning(`Could not set the effort: ${error.message}`))
         )
@@ -249,23 +328,20 @@ export class Settings extends Context.Service<Settings, {
         record(settings, Option.none(), retrieved.conversation?.model_settings)
       })
 
-      /** Switches to `choice`, keeping the current effort when the new model supports it. */
+      /** Switches to `choice`, keeping the current effort, or the closest the new model supports. */
       const applyModel = Effect.fnUntraced(function*(
         settings: SessionSettings,
         target: Target,
         choice: Models.ModelChoice
       ) {
-        const wanted = settings.effort
+        const wanted = Option.flatMap(settings.effort, (effort) => Models.nearestLevel(choice, effort))
         const response = yield* updateModel(target, {
           model_id: Models.selectionId(choice, wanted),
           model_handle: choice.handle
         })
         record(settings, Option.some(response.model_handle ?? choice.handle), response.model_settings)
         if (response.model_settings?.context_window_limit == null) settings.contextWindow = choice.contextWindow
-        if (
-          Option.isSome(wanted) && choice.levels.includes(wanted.value) &&
-          !Option.contains(settings.effort, wanted.value)
-        ) {
+        if (Option.isSome(wanted) && !Option.contains(settings.effort, wanted.value)) {
           yield* applyEffort(settings, target, choice, wanted.value).pipe(
             Effect.catch((error) => Effect.logWarning(`Could not keep the ${wanted.value} effort: ${error.message}`))
           )
@@ -295,16 +371,20 @@ export class Settings extends Context.Service<Settings, {
           Model: ({ choice }) =>
             applyModel(settings, target, choice).pipe(Effect.mapError(configFailure(configId, value))),
           Effort: ({ choice, effort }) =>
-            applyEffort(settings, target, choice, effort).pipe(
-              Effect.mapError(configFailure(configId, value)),
-              Effect.andThen(Effect.suspend(() =>
-                Option.contains(settings.effort, effort) ? Effect.void : Effect.logWarning(
-                  `Asked Letta for ${effort} effort on ${choice.handle}; it reports ${
-                    Option.getOrElse(settings.effort, () => "none recorded")
-                  }`
+            Option.match(choice, {
+              onNone: () => Effect.fail(new InvalidConfigValue({ configId, value })),
+              onSome: (choice) =>
+                applyEffort(settings, target, choice, effort).pipe(
+                  Effect.mapError(configFailure(configId, value)),
+                  Effect.andThen(Effect.suspend(() =>
+                    Option.contains(settings.effort, effort) ? Effect.void : Effect.logWarning(
+                      `Asked Letta for ${effort} effort on ${choice.handle}; it reports ${
+                        Option.getOrElse(settings.effort, () => "none recorded")
+                      }`
+                    )
+                  ))
                 )
-              ))
-            )
+            })
         })
       })
 
@@ -327,7 +407,12 @@ export class Settings extends Context.Service<Settings, {
 
       const realize = Effect.fn("Settings.realize")(
         function*(settings: SessionSettings, target: Target, created: SessionSettings) {
-          const wanted = { model: settings.model, effort: settings.effort, contextWindow: settings.contextWindow }
+          // The effort shown before the conversation existed is the one it gets, chosen or not.
+          const wanted = {
+            model: settings.model,
+            effort: Option.orElse(settings.effort, () => shownEffort(settings)),
+            contextWindow: settings.contextWindow
+          }
           settings.model = created.model
           settings.effort = created.effort
           settings.contextWindow = created.contextWindow
@@ -352,13 +437,9 @@ export class Settings extends Context.Service<Settings, {
             record(settings, Option.some(response.model_handle ?? wanted.model.value), response.model_settings)
             return
           }
-          const effort = Option.filter(
-            wanted.effort,
-            (effort) =>
-              !Option.contains(settings.effort, effort) &&
-              Option.exists(createdChoice, (choice) => choice.levels.includes(effort))
-          )
-          if (Option.isSome(effort) && Option.isSome(createdChoice)) {
+          if (Option.isNone(createdChoice)) return
+          const effort = Option.flatMap(wanted.effort, (effort) => Models.nearestLevel(createdChoice.value, effort))
+          if (Option.isSome(effort) && !Option.contains(settings.effort, effort.value)) {
             yield* applyEffort(settings, target, createdChoice.value, effort.value)
           }
         },

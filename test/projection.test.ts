@@ -77,7 +77,12 @@ describe("ACP v2 projection", () => {
   it("sends notices as finished tool calls to clients that do not present notices", () => {
     const retry = { _tag: "Notice", severity: "warning", title: "Retrying (attempt 1/3)", description: "503" } as const
     const failure = { _tag: "Notice", severity: "error", title: "Letta Code failed" } as const
-    const t3 = ProjectV2.makeProjector({ echoPrompts: false, notices: false, noticeIdPrefix: "notice-abc" })
+    const t3 = ProjectV2.makeProjector({
+      echoPrompts: false,
+      notices: false,
+      noticeIdPrefix: "notice-abc",
+      everyModelOptions: false
+    })
     assert.deepStrictEqual([...t3.project(retry), ...t3.project(failure)], [
       {
         sessionUpdate: "tool_call_update",
@@ -95,7 +100,12 @@ describe("ACP v2 projection", () => {
         status: "failed"
       }
     ])
-    const other = ProjectV2.makeProjector({ echoPrompts: false, notices: true, noticeIdPrefix: "notice-abc" })
+    const other = ProjectV2.makeProjector({
+      echoPrompts: false,
+      notices: true,
+      noticeIdPrefix: "notice-abc",
+      everyModelOptions: false
+    })
     assert.deepStrictEqual(other.project(retry), [
       { sessionUpdate: "notice", severity: "warning", title: "Retrying (attempt 1/3)", description: "503" }
     ])
@@ -162,7 +172,7 @@ describe("ACP v2 projection", () => {
   })
 
   it("uses configId for config options and typed command input", () => {
-    assert.strictEqual(ProjectV2.configOption(mode("strict")).configId, "mode")
+    assert.strictEqual(ProjectV2.configOptions([mode("strict")], false)[0]?.configId, "mode")
     assert.deepStrictEqual(
       ProjectV2.project({ _tag: "AvailableCommands", commands: [{ name: "c", description: "d", hint: "h" }] }),
       [{

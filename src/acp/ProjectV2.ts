@@ -11,6 +11,7 @@ import {
   type ConfigOption,
   type DiffHunk,
   type PermissionRequest,
+  type SelectChoice,
   SessionEvent,
   type ToolCallPatch,
   ToolContent
@@ -19,19 +20,33 @@ import type * as V2 from "./V2.ts"
 
 type Updates = ReadonlyArray<V2.SessionUpdate>
 
-export const configOption = (option: ConfigOption): V2.SessionConfigOption => ({
+const configOption = (option: ConfigOption, choices: ReadonlyArray<SelectChoice>): V2.SessionConfigOption => ({
   type: "select",
   configId: option.id,
   name: option.name,
   ...(option.description === undefined ? {} : { description: option.description }),
   category: option.category,
   currentValue: option.currentValue,
-  options: option.options.map((o) => ({
+  options: choices.map((o) => ({
     value: o.value,
     name: o.name,
     ...(o.description === undefined ? {} : { description: o.description })
   }))
 })
+
+/**
+ * The config options that apply to the session (those with choices). A
+ * client that shows one session's options for all models gets every model's
+ * choices where an option has them.
+ */
+export const configOptions = (
+  options: ReadonlyArray<ConfigOption>,
+  everyModel: boolean
+): Array<V2.SessionConfigOption> =>
+  options.flatMap((option) => {
+    const choices = everyModel ? option.everyModelOptions ?? option.options : option.options
+    return choices.length > 0 ? [configOption(option, choices)] : []
+  })
 
 const lines = (text: string) => (text === "" ? [] : text.replace(/\n$/, "").split("\n"))
 
@@ -122,7 +137,7 @@ export const project = SessionEvent.match({
   }],
   ConfigOptions: (
     e
-  ): Updates => [{ sessionUpdate: "config_option_update", configOptions: e.options.map(configOption) }],
+  ): Updates => [{ sessionUpdate: "config_option_update", configOptions: configOptions(e.options, false) }],
   SessionInfo: (e): Updates => [{
     sessionUpdate: "session_info_update",
     ...(e.title === undefined ? {} : { title: e.title }),
@@ -148,6 +163,8 @@ export interface ProjectorFeatures {
   readonly notices: boolean
   /** Keeps the ids of those tool calls unique beyond this connection: clients keep tool calls per thread. */
   readonly noticeIdPrefix: string
+  /** The client shows one session's config options for all models (see `configOptions`). */
+  readonly everyModelOptions: boolean
 }
 
 /** A notice as a finished tool call, which every client shows. */
@@ -168,6 +185,12 @@ export const makeProjector = (features: ProjectorFeatures): ProjectorV2 => {
   return {
     project: (event) => {
       if (event._tag === "UserMessage" && !features.echoPrompts) return []
+      if (event._tag === "ConfigOptions") {
+        return [{
+          sessionUpdate: "config_option_update",
+          configOptions: configOptions(event.options, features.everyModelOptions)
+        }]
+      }
       if (event._tag === "Notice" && !features.notices) {
         notices += 1
         return noticeToolCall(`${features.noticeIdPrefix}-${notices}`, event)

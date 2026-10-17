@@ -6,6 +6,9 @@
 import { NodeServices } from "@effect/platform-node"
 import { type Cause, Context, Deferred, Effect, Layer, Option, PubSub, Queue, Ref, Schema } from "effect"
 import { FetchHttpClient } from "effect/http"
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { AcpServer } from "../../src/agent/AcpServer.ts"
 import { Agent } from "../../src/agent/Agent.ts"
 import { AgentResolver } from "../../src/agent/AgentResolver.ts"
@@ -162,6 +165,12 @@ export const initializeV1 = {
   clientInfo: { name: "test-client", version: "1.0.0" },
   clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true }
 }
+
+/**
+ * A new empty directory for a session whose first prompt creates an agent:
+ * lacp records the agent in the directory's `.letta/settings.local.json`.
+ */
+export const projectDir = () => mkdtempSync(join(tmpdir(), "lacp-project-"))
 
 /** T3 Code's hybrid request: v2 fields plus v1 fields. */
 export const initializeHybrid = {
