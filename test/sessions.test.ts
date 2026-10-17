@@ -86,6 +86,21 @@ describe("lazy conversations", () => {
       assert.strictEqual(runtimeStart.mode, "strict")
     }))
 
+  it.live("rejects unknown config options, before and after the first prompt", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const sessionId = (yield* client.request("session/new", { cwd: "/work" })).result.sessionId as string
+      const set = (configId: string) =>
+        client.request("session/set_config_option", { sessionId, configId, type: "id", value: "x" })
+      // Names an object has anyway are no exception.
+      assert.strictEqual((yield* set("constructor")).error?.code, -32602)
+      yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
+      assert.strictEqual((yield* set("constructor")).error?.code, -32602)
+      assert.strictEqual((yield* set("toString")).error?.code, -32602)
+    }))
+
   it.live("reopens a session closed before its first prompt, still without a conversation", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make

@@ -7,7 +7,7 @@
  * Effort is applied through the model's catalog preset where it has one, and
  * with `letta model set --reasoning` otherwise; the mode is device state.
  */
-import { Context, Effect, Equal, Layer, Option, Schema } from "effect"
+import { Context, Effect, Equal, Layer, Match, Option, Schema } from "effect"
 import { LacpConfig } from "../Config.ts"
 import type { ConfigOption } from "../domain/Events.ts"
 import { LettaAppServer, type LettaConnection } from "../letta/AppServer.ts"
@@ -108,6 +108,29 @@ export const configOptions = (settings: SessionSettings): ReadonlyArray<ConfigOp
     options: MODES.map((m) => ({ value: m.value, name: m.name, description: m.description }))
   })
   return options
+}
+
+/** A change to one of a session's config options. */
+type Change =
+  | { readonly _tag: "Mode"; readonly mode: PermissionMode }
+  | { readonly _tag: "Model"; readonly choice: Models.ModelChoice }
+  | { readonly _tag: "Effort"; readonly choice: Models.ModelChoice; readonly effort: Models.Effort }
+
+/** The change `value` makes to option `configId`, if the session's models allow it. */
+const parseChange = (settings: SessionSettings, configId: string, value: string): Option.Option<Change> => {
+  switch (configId) {
+    case MODE_CONFIG_ID:
+      return Option.map(decodePermissionMode(value), (mode) => ({ _tag: "Mode", mode }))
+    case MODEL_CONFIG_ID:
+      return Option.map(Models.choiceFor(settings.models, value), (choice) => ({ _tag: "Model", choice }))
+    case EFFORT_CONFIG_ID:
+      return Option.all({ choice: currentChoice(settings), effort: Models.decodeEffort(value) }).pipe(
+        Option.filter(({ choice, effort }) => choice.levels.includes(effort)),
+        Option.map(({ choice, effort }) => ({ _tag: "Effort", choice, effort }))
+      )
+    default:
+      return Option.none()
+  }
 }
 
 /** Where a change applies: the session's runtime, on its connection, and its conversation. */
@@ -248,55 +271,11 @@ export class Settings extends Context.Service<Settings, {
         }
       })
 
-      type Setter = (
-        settings: SessionSettings,
-        target: Target,
-        value: string
-      ) => Effect.Effect<void, InvalidConfigValue | AgentUnavailable>
-
-      const setMode: Setter = (settings, target, value) =>
-        Option.match(decodePermissionMode(value), {
-          onNone: () => Effect.fail(new InvalidConfigValue({ configId: MODE_CONFIG_ID, value })),
-          onSome: (mode) =>
-            target.connection.send({ type: "change_device_state", runtime: target.runtime, payload: { mode } }).pipe(
-              Effect.mapError(unavailable),
-              Effect.andThen(Effect.sync(() => {
-                settings.mode = Option.some(mode)
-              }))
-            )
-        })
-
-      const setModel: Setter = (settings, target, value) =>
-        Option.match(Models.choiceFor(settings.models, value), {
-          onNone: () => Effect.fail(new InvalidConfigValue({ configId: MODEL_CONFIG_ID, value })),
-          onSome: (choice) =>
-            applyModel(settings, target, choice).pipe(Effect.mapError(configFailure(MODEL_CONFIG_ID, value)))
-        })
-
-      const setEffort: Setter = (settings, target, value) =>
-        Option.all({ choice: currentChoice(settings), effort: Models.decodeEffort(value) }).pipe(
-          Option.filter(({ choice, effort }) => choice.levels.includes(effort)),
-          Option.match({
-            onNone: () => Effect.fail(new InvalidConfigValue({ configId: EFFORT_CONFIG_ID, value })),
-            onSome: ({ choice, effort }) =>
-              applyEffort(settings, target, choice, effort).pipe(
-                Effect.mapError(configFailure(EFFORT_CONFIG_ID, value)),
-                Effect.andThen(Effect.suspend(() =>
-                  Option.contains(settings.effort, effort) ? Effect.void : Effect.logWarning(
-                    `Asked Letta for ${effort} effort on ${choice.handle}; it reports ${
-                      Option.getOrElse(settings.effort, () => "none recorded")
-                    }`
-                  )
-                ))
-              )
-          })
+      /** What a config change asks for, validated against the session's models. */
+      const parse = (settings: SessionSettings, configId: string, value: string) =>
+        Effect.fromOption(parseChange(settings, configId, value)).pipe(
+          Effect.mapError(() => new InvalidConfigValue({ configId, value }))
         )
-
-      const setters: Readonly<Record<string, Setter>> = {
-        [MODE_CONFIG_ID]: setMode,
-        [MODEL_CONFIG_ID]: setModel,
-        [EFFORT_CONFIG_ID]: setEffort
-      }
 
       const set = Effect.fn("Settings.set")(function*(
         settings: SessionSettings,
@@ -304,51 +283,44 @@ export class Settings extends Context.Service<Settings, {
         configId: string,
         value: string
       ) {
-        const setter = setters[configId]
-        return yield* setter === undefined
-          ? Effect.fail(new InvalidConfigValue({ configId, value }))
-          : setter(settings, target, value)
+        yield* Match.valueTags(yield* parse(settings, configId, value), {
+          Mode: ({ mode }) =>
+            target.connection.send({ type: "change_device_state", runtime: target.runtime, payload: { mode } }).pipe(
+              Effect.mapError(unavailable),
+              Effect.andThen(Effect.sync(() => {
+                settings.mode = Option.some(mode)
+              }))
+            ),
+          Model: ({ choice }) =>
+            applyModel(settings, target, choice).pipe(Effect.mapError(configFailure(configId, value))),
+          Effort: ({ choice, effort }) =>
+            applyEffort(settings, target, choice, effort).pipe(
+              Effect.mapError(configFailure(configId, value)),
+              Effect.andThen(Effect.suspend(() =>
+                Option.contains(settings.effort, effort) ? Effect.void : Effect.logWarning(
+                  `Asked Letta for ${effort} effort on ${choice.handle}; it reports ${
+                    Option.getOrElse(settings.effort, () => "none recorded")
+                  }`
+                )
+              ))
+            )
+        })
       })
-
-      type Chooser = (settings: SessionSettings, value: string) => Effect.Effect<void, InvalidConfigValue>
-
-      const chooseMode: Chooser = (settings, value) =>
-        Option.match(decodePermissionMode(value), {
-          onNone: () => Effect.fail(new InvalidConfigValue({ configId: MODE_CONFIG_ID, value })),
-          onSome: (mode) => Effect.sync(() => (settings.mode = Option.some(mode)))
-        })
-
-      const chooseModel: Chooser = (settings, value) =>
-        Option.match(Models.choiceFor(settings.models, value), {
-          onNone: () => Effect.fail(new InvalidConfigValue({ configId: MODEL_CONFIG_ID, value })),
-          onSome: (choice) =>
-            Effect.sync(() => {
-              settings.model = Option.some(choice.handle)
-              settings.contextWindow = choice.contextWindow
-            })
-        })
-
-      const chooseEffort: Chooser = (settings, value) =>
-        Option.all({ choice: currentChoice(settings), effort: Models.decodeEffort(value) }).pipe(
-          Option.filter(({ choice, effort }) => choice.levels.includes(effort)),
-          Option.match({
-            onNone: () => Effect.fail(new InvalidConfigValue({ configId: EFFORT_CONFIG_ID, value })),
-            onSome: ({ effort }) => Effect.sync(() => (settings.effort = Option.some(effort)))
-          })
-        )
-
-      const choosers: Readonly<Record<string, Chooser>> = {
-        [MODE_CONFIG_ID]: chooseMode,
-        [MODEL_CONFIG_ID]: chooseModel,
-        [EFFORT_CONFIG_ID]: chooseEffort
-      }
 
       const choose = Effect.fn("Settings.choose")(
         function*(settings: SessionSettings, configId: string, value: string) {
-          const chooser = choosers[configId]
-          return yield* chooser === undefined
-            ? Effect.fail(new InvalidConfigValue({ configId, value }))
-            : chooser(settings, value)
+          Match.valueTags(yield* parse(settings, configId, value), {
+            Mode: ({ mode }) => {
+              settings.mode = Option.some(mode)
+            },
+            Model: ({ choice }) => {
+              settings.model = Option.some(choice.handle)
+              settings.contextWindow = choice.contextWindow
+            },
+            Effort: ({ effort }) => {
+              settings.effort = Option.some(effort)
+            }
+          })
         }
       )
 
