@@ -1,0 +1,23 @@
+{
+  "$schema": "https://dprint.dev/schemas/v0.json",
+  "indentWidth": 2,
+  "lineWidth": 120,
+  "newLineKind": "lf",
+  "typescript": {
+    "semiColons": "asi",
+    "quoteStyle": "alwaysDouble",
+    "trailingCommas": "never",
+    "operatorPosition": "maintain",
+    "arrowFunction.useParentheses": "force"
+  },
+  "excludes": [
+    "**/node_modules",
+    "**/dist",
+    "**/*.tsbuildinfo"
+  ],
+  "plugins": [
+    "./node_modules/@dprint/typescript/plugin.wasm",
+    "./node_modules/@dprint/json/plugin.wasm",
+    "./node_modules/@dprint/markdown/plugin.wasm"
+  ]
+}
