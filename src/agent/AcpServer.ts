@@ -57,6 +57,21 @@ const summary = (s: SessionSummary) => ({
   ...(Option.isSome(s.updatedAt) ? { updatedAt: s.updatedAt.value } : {})
 })
 
+/** `session/set_model`: removed from the schema in 0.13.5, still sent by some v1 clients. */
+const LegacySetModel = Method.request(
+  "session/set_model",
+  Schema.Struct({ sessionId: Schema.String, modelId: Schema.String }),
+  Schema.Struct({})
+)
+
+const v1Options = (options: ReadonlyArray<ConfigOption>) => {
+  const modes = ProjectV1.modeState(options)
+  return {
+    configOptions: options.map(ProjectV1.configOption),
+    ...(modes === undefined ? {} : { modes })
+  }
+}
+
 const commandsV2 = (commands: ReadonlyArray<Command>) =>
   commands.map((c) => ({
     name: c.name,
@@ -81,14 +96,34 @@ export class AcpServer extends Context.Service<AcpServer, {
       const offerSetup = (terminalAuth: boolean) =>
         terminalAuth && (config.auth === "host" || config.auth === "cloud-oauth")
 
+      // --- shared by v1 and v2 ---------------------------------------------
+
+      const authenticate = ({ methodId }: { readonly methodId: string }) =>
+        methodId === SETUP_METHOD_ID ? Effect.succeed({}) : Effect.fail(RpcError.invalidParams({ methodId }))
+
+      const listSessions = (params: { readonly cwd?: string | null; readonly cursor?: string | null }) =>
+        rpc(agent.listSessions({ cwd: Option.fromNullishOr(params.cwd), cursor: Option.fromNullishOr(params.cursor) }))
+          .pipe(Effect.map((r) => ({
+            sessions: r.sessions.map(summary),
+            ...(Option.isSome(r.nextCursor) ? { nextCursor: r.nextCursor.value } : {})
+          })))
+
+      const closeSession = ({ sessionId }: { readonly sessionId: string }) =>
+        agent.closeSession(sessionId).pipe(Effect.as({}))
+
       // --- v1 ---------------------------------------------------------------
 
+      /** `session/load` (with the history replayed first) and `session/resume`. */
+      const loadV1 = (replay: boolean) => (params: typeof V1.LoadSessionRequest.Type) =>
+        Mcp.fromWire(1, params.mcpServers).pipe(
+          Effect.flatMap((mcpServers) =>
+            rpc(agent.loadSession({ sessionId: params.sessionId, cwd: params.cwd, replay, mcpServers }))
+          ),
+          Effect.map((setup) => v1Options(setup.configOptions))
+        )
+
       const v1 = Method.router([
-        Method.handle(
-          V1.Authenticate,
-          ({ methodId }) =>
-            methodId === SETUP_METHOD_ID ? Effect.succeed({}) : Effect.fail(RpcError.invalidParams({ methodId }))
-        ),
+        Method.handle(V1.Authenticate, authenticate),
         Method.handle(V1.NewSession, (params) =>
           Mcp.fromWire(1, params.mcpServers).pipe(
             Effect.flatMap((mcpServers) => rpc(agent.newSession({ cwd: params.cwd, mcpServers }))),
@@ -97,35 +132,10 @@ export class AcpServer extends Context.Service<AcpServer, {
               ...v1Options(setup.configOptions)
             }))
           )),
-        Method.handle(
-          V1.LoadSession,
-          (params) =>
-            Mcp.fromWire(1, params.mcpServers).pipe(
-              Effect.flatMap((mcpServers) =>
-                rpc(agent.loadSession({ sessionId: params.sessionId, cwd: params.cwd, replay: true, mcpServers }))
-              ),
-              Effect.map((setup) => v1Options(setup.configOptions))
-            )
-        ),
-        Method.handle(
-          V1.ResumeSession,
-          (params) =>
-            Mcp.fromWire(1, params.mcpServers).pipe(
-              Effect.flatMap((mcpServers) =>
-                rpc(agent.loadSession({ sessionId: params.sessionId, cwd: params.cwd, replay: false, mcpServers }))
-              ),
-              Effect.map((setup) => v1Options(setup.configOptions))
-            )
-        ),
-        Method.handle(V1.ListSessions, (params) =>
-          rpc(agent.listSessions({
-            cwd: Option.fromNullishOr(params.cwd),
-            cursor: Option.fromNullishOr(params.cursor)
-          })).pipe(Effect.map((r) => ({
-            sessions: r.sessions.map(summary),
-            ...(Option.isSome(r.nextCursor) ? { nextCursor: r.nextCursor.value } : {})
-          })))),
-        Method.handle(V1.CloseSession, ({ sessionId }) => agent.closeSession(sessionId).pipe(Effect.as({}))),
+        Method.handle(V1.LoadSession, loadV1(true)),
+        Method.handle(V1.ResumeSession, loadV1(false)),
+        Method.handle(V1.ListSessions, listSessions),
+        Method.handle(V1.CloseSession, closeSession),
         Method.handle(
           V1.SetSessionMode,
           ({ modeId, sessionId }) => rpc(agent.setConfigOption(sessionId, MODE_CONFIG_ID, modeId)).pipe(Effect.as({}))
@@ -168,11 +178,7 @@ export class AcpServer extends Context.Service<AcpServer, {
         )
 
       const v2 = Method.router([
-        Method.handle(
-          V2.Login,
-          ({ methodId }) =>
-            methodId === SETUP_METHOD_ID ? Effect.succeed({}) : Effect.fail(RpcError.invalidParams({ methodId }))
-        ),
+        Method.handle(V2.Login, authenticate),
         Method.handle(
           V2.Logout,
           () =>
@@ -210,15 +216,8 @@ export class AcpServer extends Context.Service<AcpServer, {
             }))
           )
         }),
-        Method.handle(V2.ListSessions, (params) =>
-          rpc(agent.listSessions({
-            cwd: Option.fromNullishOr(params.cwd),
-            cursor: Option.fromNullishOr(params.cursor)
-          })).pipe(Effect.map((r) => ({
-            sessions: r.sessions.map(summary),
-            ...(Option.isSome(r.nextCursor) ? { nextCursor: r.nextCursor.value } : {})
-          })))),
-        Method.handle(V2.CloseSession, ({ sessionId }) => agent.closeSession(sessionId).pipe(Effect.as({}))),
+        Method.handle(V2.ListSessions, listSessions),
+        Method.handle(V2.CloseSession, closeSession),
         Method.handle(V2.SetSessionConfigOption, (params) =>
           params.type !== "id" || typeof params.value !== "string"
             ? Effect.fail(RpcError.invalidParams({ configId: params.configId, type: params.type }))
@@ -238,98 +237,94 @@ export class AcpServer extends Context.Service<AcpServer, {
 
       // --- initialize -------------------------------------------------------
 
-      const initialize = (raw: unknown): Effect.Effect<unknown, RpcError> =>
-        Effect.gen(function*() {
-          if (Option.isSome(yield* Ref.get(surface))) {
-            return yield* RpcError.invalidRequest({ reason: "already initialized" })
-          }
-          const { protocolVersion: requested } = yield* decodeHeader(raw ?? {}).pipe(
-            Effect.mapError((e) => RpcError.invalidParams({ reason: e.message }))
-          )
-          const v2Request = config.maxAcpVersion >= 2 && requested >= 2 ? decodeV2Initialize(raw) : Option.none()
+      const initialize = Effect.fnUntraced(function*(raw: unknown): Effect.fn.Return<unknown, RpcError> {
+        if (Option.isSome(yield* Ref.get(surface))) {
+          return yield* RpcError.invalidRequest({ reason: "already initialized" })
+        }
+        const { protocolVersion: requested } = yield* decodeHeader(raw ?? {}).pipe(
+          Effect.mapError((e) => RpcError.invalidParams({ reason: e.message }))
+        )
+        const v2Request = config.maxAcpVersion >= 2 && requested >= 2 ? decodeV2Initialize(raw) : Option.none()
 
-          if (Option.isSome(v2Request)) {
-            const capabilities = v2Request.value.capabilities ?? {}
-            yield* client.select({ version: 2, capabilities, client: v2Request.value.info })
-            yield* Ref.set(surface, Option.some(v2))
-            yield* Effect.logInfo(`ACP v2 negotiated with ${v2Request.value.info.name} ${v2Request.value.info.version}`)
-            yield* agent.warmup
-            const terminal = capabilities.auth?.terminal !== undefined && capabilities.auth.terminal !== null
-            return yield* encodeV2Initialize({
-              protocolVersion: V2.PROTOCOL_VERSION,
-              info: agentInfo,
-              capabilities: {
-                session: { prompt: { image: {}, embeddedContext: {} }, mcp: { stdio: {}, http: {} } }
-              },
-              authMethods: offerSetup(terminal)
-                ? [{
-                  type: "terminal",
-                  methodId: SETUP_METHOD_ID,
-                  name: SETUP_NAME,
-                  description: SETUP_DESCRIPTION,
-                  args: ["setup"]
-                }]
-                : []
-            }).pipe(Effect.mapError((e) => RpcError.internal(e.message)))
-          }
-
-          if (requested < 1 && config.maxAcpVersion >= 2) {
-            return yield* RpcError.of(ErrorCode.UnsupportedProtocolVersion, "Unsupported protocol version", {
-              requested,
-              supported: [1, 2]
-            })
-          }
-
-          const v1Request = Option.getOrElse(
-            decodeV1Initialize(raw),
-            (): V1.InitializeRequest => ({ protocolVersion: requested })
-          )
-          const capabilities = v1Request.clientCapabilities ?? {}
-          yield* client.select({ version: 1, capabilities })
-          yield* Ref.set(surface, Option.some(v1))
-          const name = v1Request.clientInfo?.name ?? "an unnamed client"
-          yield* Effect.logInfo(`ACP v1 negotiated with ${name} (requested v${requested})`)
+        if (Option.isSome(v2Request)) {
+          const capabilities = v2Request.value.capabilities ?? {}
+          yield* client.select({ version: 2, capabilities, client: v2Request.value.info })
+          yield* Ref.set(surface, Option.some(v2))
+          yield* Effect.logInfo(`ACP v2 negotiated with ${v2Request.value.info.name} ${v2Request.value.info.version}`)
           yield* agent.warmup
-          const terminal = capabilities.auth?.terminal === true || capabilities._meta?.["terminal-auth"] === true
-          return yield* encodeV1Initialize({
-            protocolVersion: V1.PROTOCOL_VERSION,
-            agentCapabilities: {
-              loadSession: true,
-              promptCapabilities: { image: true, audio: false, embeddedContext: true },
-              mcpCapabilities: { http: true, sse: false },
-              sessionCapabilities: { list: {}, resume: {}, close: {} }
+          const terminal = capabilities.auth?.terminal !== undefined && capabilities.auth.terminal !== null
+          return yield* encodeV2Initialize({
+            protocolVersion: V2.PROTOCOL_VERSION,
+            info: agentInfo,
+            capabilities: {
+              session: { prompt: { image: {}, embeddedContext: {} }, mcp: { stdio: {}, http: {} } }
             },
             authMethods: offerSetup(terminal)
               ? [{
                 type: "terminal",
-                id: SETUP_METHOD_ID,
+                methodId: SETUP_METHOD_ID,
                 name: SETUP_NAME,
                 description: SETUP_DESCRIPTION,
                 args: ["setup"]
               }]
-              : [],
-            agentInfo
+              : []
           }).pipe(Effect.mapError((e) => RpcError.internal(e.message)))
-        })
+        }
+
+        if (requested < 1 && config.maxAcpVersion >= 2) {
+          return yield* RpcError.of(ErrorCode.UnsupportedProtocolVersion, "Unsupported protocol version", {
+            requested,
+            supported: [1, 2]
+          })
+        }
+
+        const v1Request = Option.getOrElse(
+          decodeV1Initialize(raw),
+          (): V1.InitializeRequest => ({ protocolVersion: requested })
+        )
+        const capabilities = v1Request.clientCapabilities ?? {}
+        yield* client.select({ version: 1, capabilities })
+        yield* Ref.set(surface, Option.some(v1))
+        const name = v1Request.clientInfo?.name ?? "an unnamed client"
+        yield* Effect.logInfo(`ACP v1 negotiated with ${name} (requested v${requested})`)
+        yield* agent.warmup
+        const terminal = capabilities.auth?.terminal === true || capabilities._meta?.["terminal-auth"] === true
+        return yield* encodeV1Initialize({
+          protocolVersion: V1.PROTOCOL_VERSION,
+          agentCapabilities: {
+            loadSession: true,
+            promptCapabilities: { image: true, audio: false, embeddedContext: true },
+            mcpCapabilities: { http: true, sse: false },
+            sessionCapabilities: { list: {}, resume: {}, close: {} }
+          },
+          authMethods: offerSetup(terminal)
+            ? [{
+              type: "terminal",
+              id: SETUP_METHOD_ID,
+              name: SETUP_NAME,
+              description: SETUP_DESCRIPTION,
+              args: ["setup"]
+            }]
+            : [],
+          agentInfo
+        }).pipe(Effect.mapError((e) => RpcError.internal(e.message)))
+      })
 
       const dispatcher: Method.Dispatcher = {
         request: (method) =>
           Option.some((params: unknown) =>
-            Ref.get(surface).pipe(
-              Effect.flatMap(Option.match({
-                onNone: () =>
-                  method === V1.Initialize.name
-                    ? initialize(params)
-                    : Effect.fail(RpcError.invalidRequest({ reason: "the connection is not initialized" })),
-                onSome: (d) =>
-                  method === V1.Initialize.name
-                    ? initialize(params)
-                    : Option.match(d.request(method), {
+            method === V1.Initialize.name
+              ? initialize(params)
+              : Ref.get(surface).pipe(
+                Effect.flatMap(Option.match({
+                  onNone: () => Effect.fail(RpcError.invalidRequest({ reason: "the connection is not initialized" })),
+                  onSome: (d) =>
+                    Option.match(d.request(method), {
                       onNone: () => Effect.fail(RpcError.methodNotFound(method)),
                       onSome: (run) => run(params)
                     })
-              }))
-            )
+                }))
+              )
           ),
         notification: (method) =>
           Option.some((params: unknown) =>
@@ -349,19 +344,4 @@ export class AcpServer extends Context.Service<AcpServer, {
       return AcpServer.of({ serve: peer.serve(dispatcher) })
     })
   )
-}
-
-/** `session/set_model`: removed from the schema in 0.13.5, still sent by some v1 clients. */
-const LegacySetModel = Method.request(
-  "session/set_model",
-  Schema.Struct({ sessionId: Schema.String, modelId: Schema.String }),
-  Schema.Struct({})
-)
-
-const v1Options = (options: ReadonlyArray<ConfigOption>) => {
-  const modes = ProjectV1.modeState(options)
-  return {
-    configOptions: options.map(ProjectV1.configOption),
-    ...(modes === undefined ? {} : { modes })
-  }
 }

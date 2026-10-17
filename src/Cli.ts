@@ -19,14 +19,14 @@ import { Agent } from "./agent/Agent.ts"
 import { AcpClient } from "./agent/Client.ts"
 import { SessionIds } from "./agent/SessionIds.ts"
 import { Settings } from "./agent/Settings.ts"
-import { type AuthMode, LacpConfig, type LacpConfigShape, type LettaRuntime } from "./Config.ts"
+import { AcpVersion, AuthMode, LacpConfig, type LacpConfigShape, LettaRuntime } from "./Config.ts"
 import { Host } from "./Host.ts"
 import { JsonRpcPeer } from "./jsonrpc/Peer.ts"
 import { Transport } from "./jsonrpc/Transport.ts"
 import { layerWebSocket, LettaAppServer } from "./letta/AppServer.ts"
 import { LettaExecutable, type LettaInstall } from "./letta/Executable.ts"
 import * as Login from "./letta/Login.ts"
-import { ListModelsResponse, type PermissionMode } from "./letta/Protocol.ts"
+import { ListModelsResponse, PermissionMode } from "./letta/Protocol.ts"
 import * as LogFile from "./LogFile.ts"
 import { VERSION } from "./Version.ts"
 
@@ -40,18 +40,13 @@ class SetupFailed extends Schema.TaggedError<SetupFailed, { readonly brand: uniq
   { exitCode: Schema.Int }
 ) {}
 
-const AUTH_MODES = ["host", "cloud-oauth", "api-key", "local"] as const
-const PERMISSION_MODES = ["standard", "acceptEdits", "unrestricted", "strict"] as const
-const ACP_VERSIONS = ["1", "2"] as const
-const LETTA_RUNTIMES = ["auto", "node", "bun"] as const
-
 const flags = {
-  auth: Flag.Literals("auth", AUTH_MODES).pipe(
+  auth: Flag.Literals("auth", AuthMode.literals).pipe(
     Flag.withDescription(
       "How Letta Code authenticates: host (use the host's own setup), cloud-oauth (`letta setup` login), " +
         "api-key (LETTA_API_KEY), or local (on-device backend). Env: LACP_AUTH"
     ),
-    Flag.withFallbackConfig(Config.Literals(AUTH_MODES, "LACP_AUTH")),
+    Flag.withFallbackConfig(Config.Literals(AuthMode.literals, "LACP_AUTH")),
     Flag.withDefault<AuthMode>("host")
   ),
   agentId: Flag.String("agent-id").pipe(
@@ -64,9 +59,9 @@ const flags = {
     Flag.withFallbackConfig(Config.String("LACP_MODEL")),
     Flag.optional
   ),
-  permissionMode: Flag.Literals("permission-mode", PERMISSION_MODES).pipe(
+  permissionMode: Flag.Literals("permission-mode", PermissionMode.literals).pipe(
     Flag.withDescription("Permission mode of new sessions (default: unrestricted). Env: LACP_PERMISSION_MODE"),
-    Flag.withFallbackConfig(Config.Literals(PERMISSION_MODES, "LACP_PERMISSION_MODE")),
+    Flag.withFallbackConfig(Config.Literals(PermissionMode.literals, "LACP_PERMISSION_MODE")),
     Flag.optional
   ),
   lettaPath: Flag.String("letta-path").pipe(
@@ -74,12 +69,12 @@ const flags = {
     Flag.withFallbackConfig(Config.String("LACP_LETTA_PATH")),
     Flag.optional
   ),
-  lettaRuntime: Flag.Literals("letta-runtime", LETTA_RUNTIMES).pipe(
+  lettaRuntime: Flag.Literals("letta-runtime", LettaRuntime.literals).pipe(
     Flag.withDescription(
       "Runtime for Letta Code: auto (Node while ~/.letta/settings.json holds your login, else Bun if installed), " +
         "node, or bun. Letta Code keeps its login in the system keychain only under Bun. Env: LACP_LETTA_RUNTIME"
     ),
-    Flag.withFallbackConfig(Config.Literals(LETTA_RUNTIMES, "LACP_LETTA_RUNTIME")),
+    Flag.withFallbackConfig(Config.Literals(LettaRuntime.literals, "LACP_LETTA_RUNTIME")),
     Flag.withDefault<LettaRuntime>("auto")
   ),
   appServerUrl: Flag.String("app-server-url").pipe(
@@ -89,12 +84,12 @@ const flags = {
     Flag.withFallbackConfig(Config.String("LACP_APP_SERVER_URL")),
     Flag.optional
   ),
-  acpVersion: Flag.Literals("acp-version", ACP_VERSIONS).pipe(
+  acpVersion: Flag.Literals("acp-version", AcpVersion.literals).pipe(
     Flag.withDescription(
       "Highest ACP protocol version to negotiate (2 = draft v2 when the client asks). Env: LACP_ACP_VERSION"
     ),
-    Flag.withFallbackConfig(Config.Literals(ACP_VERSIONS, "LACP_ACP_VERSION")),
-    Flag.withDefault<"1" | "2">("2")
+    Flag.withFallbackConfig(Config.Literals(AcpVersion.literals, "LACP_ACP_VERSION")),
+    Flag.withDefault<AcpVersion>("2")
   ),
   echoPrompts: Flag.Boolean("echo-prompts").pipe(
     Flag.withDescription(

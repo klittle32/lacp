@@ -68,7 +68,6 @@ export const LineJson = Schema.fromJsonString(Schema.Unknown)
 export const isRequest = Schema.is(RequestMessage)
 export const isNotification = Schema.is(NotificationMessage)
 export const isSuccess = Schema.is(SuccessMessage)
-export const isFailure = Schema.is(FailureMessage)
 
 /** Error codes used by ACP (JSON-RPC standard codes plus ACP-specific ones). */
 export const ErrorCode = {

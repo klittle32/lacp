@@ -34,6 +34,7 @@ import {
   LoopErrorDelta,
   ReasoningDelta,
   RetryDelta,
+  TextPart,
   ToolCallDelta,
   ToolReturnDelta,
   UsageDelta,
@@ -117,7 +118,6 @@ const decodeLoopError = decode(LoopErrorDelta)
 const decodeError = decode(ErrorDelta)
 const decodeUsage = decode(UsageDelta)
 const decodeArguments = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))
-const TextPart = Schema.Struct({ type: Schema.Literal("text"), text: Schema.String })
 const isTextPart = Schema.is(TextPart)
 
 /** Flattens Letta message content (a string or content parts) to text. */

@@ -33,8 +33,6 @@ type Selected =
 export class AcpClient extends Context.Service<AcpClient, {
   /** Fixes the protocol surface after `initialize`. */
   select(surface: Surface): Effect.Effect<void>
-  /** The negotiated version, if `initialize` has completed. */
-  readonly version: Effect.Effect<Option.Option<1 | 2>>
   emit(sessionId: string, event: SessionEvent): Effect.Effect<void>
   requestPermission(sessionId: string, request: PermissionRequest): Effect.Effect<PermissionDecision>
 }>()("lacp/agent/AcpClient") {
@@ -68,7 +66,6 @@ export class AcpClient extends Context.Service<AcpClient, {
             }
           yield* Ref.set(selected, Option.some(projector))
         }),
-        version: Ref.get(selected).pipe(Effect.map(Option.map((s) => s.version))),
         emit: Effect.fnUntraced(function*(sessionId, event) {
           const surface = yield* Ref.get(selected)
           if (Option.isNone(surface)) return

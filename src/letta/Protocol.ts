@@ -50,7 +50,7 @@ export const ExternalToolDefinition = Schema.Struct({
 })
 export type ExternalToolDefinition = typeof ExternalToolDefinition.Type
 
-export const ExternalToolsGroup = Schema.Struct({
+const ExternalToolsGroup = Schema.Struct({
   scope_id: opt(Schema.String),
   tools: Schema.Array(ExternalToolDefinition)
 })
@@ -445,8 +445,8 @@ export type StreamDelta = typeof StreamDelta.Type
 
 export const DeltaHeader = Schema.Struct({ message_type: Schema.String })
 
-const TextPart = Schema.Struct({ type: Schema.Literal("text"), text: Schema.String })
-export const MessageContent = Schema.Union([Schema.String, Schema.Array(Schema.Union([TextPart, Schema.Unknown]))])
+export const TextPart = Schema.Struct({ type: Schema.Literal("text"), text: Schema.String })
+const MessageContent = Schema.Union([Schema.String, Schema.Array(Schema.Union([TextPart, Schema.Unknown]))])
 
 export const AssistantDelta = Schema.Struct({
   message_type: Schema.Literal("assistant_message"),

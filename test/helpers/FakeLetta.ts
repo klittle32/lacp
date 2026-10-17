@@ -4,7 +4,7 @@
  * Commands are recorded and answered by overridable handlers; tests push
  * runtime frames (stream deltas, approvals, turn ends) with `emit`.
  */
-import { Effect, Option, PubSub, Ref, Schema } from "effect"
+import { Effect, PubSub, Ref, Schema } from "effect"
 import type { Frame, LettaConnection, Reply } from "../../src/letta/AppServer.ts"
 import { LettaRequestFailed } from "../../src/letta/Errors.ts"
 import { type Command, FrameHeader } from "../../src/letta/Protocol.ts"
@@ -243,7 +243,6 @@ export const make = Effect.gen(function*() {
       protocol_version: 1,
       capabilities: { runtime_external_tools_update: true }
     },
-    install: Option.none(),
     call: <A extends Reply, I>(make: (requestId: string) => Command, response: Schema.Codec<A, I>) =>
       Effect.gen(function*() {
         const command = make("req")

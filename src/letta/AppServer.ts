@@ -58,8 +58,6 @@ export interface LettaConnection {
   /** Increments every time a new App Server connection is established. */
   readonly generation: number
   readonly info: AppServerInfo
-  /** The executable behind this connection, when it was spawned by us. */
-  readonly install: Option.Option<LettaInstall>
   /** Sends a command and awaits its `request_id`-correlated response. */
   call<A extends Reply, I>(
     make: (requestId: string) => Command,
@@ -230,15 +228,10 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
       /** Opens one connection inside the current scope. */
       const connect = Effect.fnUntraced(function*(generation: number) {
         const closed = yield* Deferred.make<never, LettaDisconnected>()
-        let install = Option.none<LettaInstall>()
-        let url: string
-        if (Option.isSome(config.appServerUrl)) {
-          url = config.appServerUrl.value
-        } else {
-          const resolved = yield* executable.resolve
-          install = Option.some(resolved)
-          url = yield* spawnServer(resolved, closed)
-        }
+        const url = yield* Option.match(config.appServerUrl, {
+          onSome: Effect.succeed,
+          onNone: () => executable.resolve.pipe(Effect.flatMap((install) => spawnServer(install, closed)))
+        })
         yield* Effect.logDebug(`Connecting to Letta Code App Server at ${url}`)
 
         const socket = yield* Socket.makeWebSocket(url, { openTimeout: "15 seconds" }).pipe(
@@ -361,7 +354,6 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
         return {
           generation,
           info,
-          install,
           call,
           send,
           subscribe: PubSub.subscribe(frames),
@@ -374,21 +366,20 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
         readonly connection: LettaConnection
         readonly scope: Scope.Closeable
       }
-      const state = yield* SynchronizedRef.make(Option.none<Live>())
-      let generations = 0
+      const state = yield* SynchronizedRef.make({ live: Option.none<Live>(), generation: 0 })
 
-      const connection = SynchronizedRef.modifyEffect(state, (current) =>
+      const connection = SynchronizedRef.modifyEffect(state, ({ live, generation }) =>
         Effect.gen(function*() {
-          if (Option.isSome(current)) {
-            if (yield* current.value.connection.isAlive) return [current.value.connection, current] as const
-            yield* Scope.close(current.value.scope, Exit.void)
+          if (Option.isSome(live)) {
+            if (yield* live.value.connection.isAlive) return [live.value.connection, { live, generation }] as const
+            yield* Scope.close(live.value.scope, Exit.void)
           }
           const scope = yield* Scope.fork(layerScope)
-          const next = yield* connect(++generations).pipe(
+          const next = yield* connect(generation + 1).pipe(
             Scope.provide(scope),
-            Effect.tapError(() => Scope.close(scope, Exit.void))
+            Effect.onError(() => Scope.close(scope, Exit.void))
           )
-          return [next, Option.some({ connection: next, scope })] as const
+          return [next, { live: Option.some({ connection: next, scope }), generation: next.generation }] as const
         })).pipe(Effect.withSpan("LettaAppServer.connection"))
 
       const warmup = connection.pipe(
@@ -398,10 +389,13 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
         Effect.asVoid
       )
 
-      const cli = (args: ReadonlyArray<string>) => {
-        const command = `letta ${args.join(" ")}`
-        const failed = (message: string) => new LettaRequestFailed({ command, message })
-        return Effect.gen(function*() {
+      /** The failure of the `letta` subcommand `args`. */
+      const cliFailed = (args: ReadonlyArray<string>) => (message: string) =>
+        new LettaRequestFailed({ command: `letta ${args.join(" ")}`, message })
+
+      const cli = Effect.fn("LettaAppServer.cli")(
+        function*(args: ReadonlyArray<string>) {
+          const failed = cliFailed(args)
           if (Option.isSome(config.appServerUrl)) {
             return yield* failed("not available when connecting to LACP_APP_SERVER_URL")
           }
@@ -428,12 +422,14 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
             )
           }
           return stdout
-        }).pipe(
-          Effect.scoped,
-          Effect.timeoutOrElse({ duration: "60 seconds", orElse: () => Effect.fail(failed("timed out")) }),
-          Effect.catchTag("PlatformError", (error) => Effect.fail(failed(error.message)))
-        )
-      }
+        },
+        (effect, args) =>
+          effect.pipe(
+            Effect.scoped,
+            Effect.timeoutOrElse({ duration: "60 seconds", orElse: () => Effect.fail(cliFailed(args)("timed out")) }),
+            Effect.catchTag("PlatformError", (error) => Effect.fail(cliFailed(args)(error.message)))
+          )
+      )
 
       return LettaAppServer.of({ connection, warmup, cli })
     })

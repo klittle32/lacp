@@ -1,8 +1,9 @@
 /**
  * The agent core: ACP sessions backed by Letta Code App Server runtimes.
  *
- * Each ACP session is one Letta conversation (the ACP session id *is* the
- * Letta conversation id), attached to the App Server as a runtime. The core is
+ * Each ACP session is one Letta conversation, attached to the App Server as a
+ * runtime; a new session gets its conversation with its first prompt (see
+ * {@link SessionIds} for the ids of such sessions). The core is
  * protocol-version neutral: it emits {@link SessionEvent}s and permission
  * requests through {@link AcpClient}, and exposes turn completion as an effect
  * that the v1 surface awaits and the v2 surface reports via `state_update`.
@@ -41,6 +42,7 @@ import type {
 import { Host } from "../Host.ts"
 import { type Frame, LettaAppServer, type LettaConnection } from "../letta/AppServer.ts"
 import {
+  AbortMessageResponse,
   AgentRetrieveResponse,
   ControlRequest,
   ConversationListResponse,
@@ -1405,11 +1407,7 @@ export class Agent extends Context.Service<Agent, {
         if (Option.isSome(attachment)) {
           yield* attachment.value.connection.call(
             (request_id) => ({ type: "abort_message", request_id, runtime: attachment.value.runtime }),
-            Schema.Struct({
-              aborted: Schema.optionalKey(Schema.Boolean),
-              success: Schema.optionalKey(Schema.Boolean),
-              error: Schema.optionalKey(Schema.NullOr(Schema.String))
-            }),
+            AbortMessageResponse,
             { timeout: "10 seconds" }
           ).pipe(
             // Letta reports the end of an aborted turn only once the model request settles,

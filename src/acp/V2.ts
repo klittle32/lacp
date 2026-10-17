@@ -30,7 +30,6 @@ import {
 export const PROTOCOL_VERSION = 2
 
 const Marker = optNull(Schema.Struct({ _meta: Meta }))
-const present = {} as const
 
 // ---------------------------------------------------------------------------
 // initialize / auth
@@ -94,9 +93,6 @@ export const Initialize = request("initialize", InitializeRequest, InitializeRes
 
 export const Login = request("auth/login", Schema.Struct({ methodId: Schema.String, _meta: Meta }), EmptyResponse)
 export const Logout = request("auth/logout", Schema.Struct({ _meta: Meta }), EmptyResponse)
-
-/** The `{}` marker value for capability fields. */
-export const supported = present
 
 // ---------------------------------------------------------------------------
 // Sessions

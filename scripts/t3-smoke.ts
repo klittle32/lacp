@@ -79,8 +79,8 @@ type SmokeConfig = Config.Success<typeof SmokeConfig>
 // --- processes ----------------------------------------------------------------
 
 /** Runs a command to completion and returns its output; a non-zero exit fails the step. */
-const run = (step: string, command: string, args: ReadonlyArray<string>, env: Record<string, string> = {}) =>
-  Effect.gen(function*() {
+const run = Effect.fnUntraced(
+  function*(step: string, command: string, args: ReadonlyArray<string>, env: Record<string, string> = {}) {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
     const handle = yield* spawner.spawn(
       ChildProcess.make(command, args, { env, extendEnv: true, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
@@ -92,7 +92,10 @@ const run = (step: string, command: string, args: ReadonlyArray<string>, env: Re
       return yield* new SmokeFailed({ step, message: `${command} exited with ${code}:\n${output.slice(-2000)}` })
     }
     return output
-  }).pipe(Effect.scoped, Effect.catchTag("PlatformError", (error) => Effect.fail(fail(step)(error))))
+  },
+  (effect, step) =>
+    effect.pipe(Effect.scoped, Effect.catchTag("PlatformError", (error) => Effect.fail(fail(step)(error))))
+)
 
 /**
  * Starts a process for the rest of the scope, copies its output to

@@ -33,7 +33,6 @@ export const notification = <P, PI>(name: string, params: Schema.Codec<P, PI>): 
   params
 })
 
-/** Params schema for methods whose params may be omitted or `null` on the wire. */
 /** A handler with its params/result codecs erased, ready for dispatch. */
 export interface Handler {
   readonly _tag: "Request" | "Notification"
@@ -94,9 +93,3 @@ export const router = (handlers: Iterable<Handler>): Dispatcher => {
     notification: (method) => Option.fromUndefinedOr(notifications.get(method))
   }
 }
-
-/** Tries each dispatcher in order. */
-export const orElse = (...dispatchers: ReadonlyArray<Dispatcher>): Dispatcher => ({
-  request: (method) => Option.firstSomeOf(dispatchers.map((d) => d.request(method))),
-  notification: (method) => Option.firstSomeOf(dispatchers.map((d) => d.notification(method)))
-})
