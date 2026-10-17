@@ -9,6 +9,7 @@ src/
 ├── Cli.ts                effect/cli: `lacp`, `lacp setup`, `lacp doctor`; flags with env fallbacks
 ├── Config.ts             LacpConfig (auth mode, agent, model, permission mode, ACP version, …)
 ├── Host.ts               the host process environment (env, platform, cwd, home) as a service
+├── LogFile.ts            the optional log file (`LACP_LOG_FILE`), alongside stderr
 ├── jsonrpc/              transport-agnostic JSON-RPC 2.0
 │   ├── JsonRpc.ts        wire schemas, error codes, RpcError
 │   ├── Method.ts         typed method descriptors, handlers, dispatchers
@@ -22,7 +23,9 @@ src/
 ├── domain/Events.ts      the version-neutral session model (v2-shaped)
 ├── agent/
 │   ├── AcpServer.ts      initialize negotiation; v1 and v2 method sets over the core
-│   ├── Agent.ts          the core: sessions ⇄ Letta runtimes, turns, approvals, history
+│   ├── Agent.ts          the core: sessions ⇄ Letta runtimes, frame routing, turns, approvals, history
+│   ├── Turn.ts           a turn's phase (Submitted, Queued, Running, Held) and its transitions
+│   ├── AgentResolver.ts  which Letta agent a session uses: configured, the host's last one, or a new one
 │   ├── Settings.ts       a session's model, effort and mode: config options and applying changes (a service)
 │   ├── SessionIds.ts     lacp's own ids for sessions created before their conversation, and their conversations
 │   ├── Errors.ts         the core's errors, mapped onto JSON-RPC errors by AcpServer
@@ -32,7 +35,9 @@ src/
 │   ├── Executable.ts     finds and validates the host's `letta`; picks Node or Bun for `letta.js`
 │   ├── Login.ts          where Letta Code's login lives (settings file or keychain)
 │   ├── AppServer.ts      spawns `letta server --listen`, WebSocket client, request correlation, restarts
-│   ├── Protocol.ts       schemas for App Server commands and frames
+│   ├── Protocol.ts       schemas for App Server commands and frames (`RuntimeFrame`, `Delta` unions)
+│   ├── History.ts        a conversation's stored messages, paged as a Stream
+│   ├── Commands.ts       Letta's slash commands as an editor sees them
 │   ├── Models.ts         Letta's models → model choices with effort levels; how a change is applied
 │   ├── Translator.ts     stream deltas / history rows → domain events
 │   ├── Tools.ts          tool-call presentation (titles, kinds, locations, diffs, plans)
@@ -42,7 +47,7 @@ src/
     ├── Protocol.ts       MCP lifecycle, tools and server-to-client method schemas
     ├── Transports.ts     stdio (child process) and Streamable HTTP (POST + JSON/SSE, session id) transports
     ├── McpClient.ts      initialize, paginated tools/list, list_changed, tools/call, roots/list, ping
-    └── Bridge.ts         a session's servers as Letta external tools: names, definitions, results
+    └── Bridge.ts         McpBridges: a session's servers as Letta external tools (names, definitions, results)
 ```
 
 ## Sessions and conversations
@@ -72,7 +77,8 @@ id) start their runtime at once.
    is _inserted_: a `UserMessage` event and `State(running)` are emitted and a `PromptHandle` is returned.
    - v2 answers `session/prompt` right away with `{ messageId }`.
    - v1 awaits `handle.completion` and answers with the stop reason.
-3. The session's frame fiber routes App Server frames for its conversation:
+3. The session's frame fiber decodes App Server frames for its conversation (`RuntimeFrame`) and routes them by
+   type (`Match`):
    - `stream_delta` → `Translator` → events (message/thought chunks, tool-call upserts, terminals, plans, usage);
    - `control_request` → a permission request to the client, answered back as an `approval_response`;
    - `turn_finished` → remaining tool calls are closed, `State(idle, stopReason)` is emitted and the turn resolves.
@@ -95,7 +101,9 @@ Cancellation sends `abort_message` and ends the turn as soon as Letta acknowledg
 of an aborted turn only once the model request settles, which takes as long as the model stays silent. If Letta
 has nothing to abort and never reports the end of the turn, the turn is ended locally after 15 seconds. Either way
 the turn's late output and end are dropped. A queued input (Letta still finishing earlier work) only counts as
-started once Letta dequeues or echoes it, so a `turn_finished` for the earlier work cannot end the new turn.
+started once Letta dequeues or echoes it, so a `turn_finished` for the earlier work cannot end the new turn. These
+rules are the turn's phases in `src/agent/Turn.ts`: Submitted (sent, not yet acknowledged), Queued, Running, and
+Held (waiting for background work).
 
 ## The Letta connection
 
