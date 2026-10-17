@@ -16,6 +16,7 @@ import { FetchHttpClient } from "effect/http"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { AcpServer } from "./agent/AcpServer.ts"
 import { Agent } from "./agent/Agent.ts"
+import { AgentResolver } from "./agent/AgentResolver.ts"
 import { AcpClient } from "./agent/Client.ts"
 import { SessionIds } from "./agent/SessionIds.ts"
 import { Settings } from "./agent/Settings.ts"
@@ -170,6 +171,7 @@ const ServerLayer = AcpServer.layer.pipe(
   Layer.provide(Agent.layer),
   Layer.provide(Settings.layer),
   Layer.provide(SessionIds.layer),
+  Layer.provide(AgentResolver.layer),
   Layer.provide(FetchHttpClient.layer),
   Layer.provide(LettaAppServer.layer),
   Layer.provide(LettaExecutable.layer),

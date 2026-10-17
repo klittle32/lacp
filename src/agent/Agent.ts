@@ -15,7 +15,6 @@ import {
   Equal,
   Exit,
   FiberSet,
-  FileSystem,
   Layer,
   Match,
   Option,
@@ -43,14 +42,12 @@ import type {
 import { Host } from "../Host.ts"
 import { type Frame, LettaAppServer, type LettaConnection } from "../letta/AppServer.ts"
 import * as Commands from "../letta/Commands.ts"
+import * as History from "../letta/History.ts"
 import {
   AbortMessageResponse,
-  AgentRetrieveResponse,
   type ControlRequest,
   ConversationListResponse,
-  ConversationMessagesListResponse,
   ConversationRetrieveResponse,
-  CreateAgentResponse,
   type DeviceStatus,
   ExecuteCommandResponse,
   type ExternalToolCallRequest,
@@ -72,6 +69,7 @@ import * as Translator from "../letta/Translator.ts"
 import * as Bridge from "../mcp/Bridge.ts"
 import type { McpServerConfig } from "../mcp/Config.ts"
 import { AGENT_NAME, AGENT_TITLE, VERSION } from "../Version.ts"
+import { AgentResolver } from "./AgentResolver.ts"
 import { AcpClient } from "./Client.ts"
 import { type AgentError, AgentUnavailable, PromptRejected, SessionNotFound, unavailable } from "./Errors.ts"
 import { plainText, slashCommand, toLettaContent } from "./Prompt.ts"
@@ -117,14 +115,6 @@ export interface SessionSummary {
 
 const decodeRuntimeFrame = Schema.decodeUnknownOption(RuntimeFrame)
 const decodeDeltaRun = Schema.decodeUnknownOption(Schema.Struct({ run_id: Schema.String }))
-
-/** The last agents the host's Letta Code used, from its settings files. */
-const ProjectSettings = Schema.Struct({
-  lastAgent: Schema.optionalKey(Schema.NullOr(Schema.String)),
-  lastSession: Schema.optionalKey(Schema.NullOr(Schema.Struct({ agentId: Schema.String }))),
-  sessionsByServer: Schema.optionalKey(Schema.Record(Schema.String, Schema.Struct({ agentId: Schema.String })))
-})
-const decodeSettings = Schema.decodeUnknownOption(Schema.fromJsonString(ProjectSettings))
 
 // ---------------------------------------------------------------------------
 // Session state
@@ -248,13 +238,12 @@ export class Agent extends Context.Service<Agent, {
       const client = yield* AcpClient
       const crypto = yield* Crypto
       const sessionIds = yield* SessionIds
-      const fs = yield* FileSystem.FileSystem
+      const agents = yield* AgentResolver
       const path = yield* Path.Path
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
       const httpClient = yield* HttpClient.HttpClient
       const layerScope = yield* Effect.scope
       const sessions = new Map<string, Session>()
-      const agentsByCwd = new Map<string, string>()
 
       // A failing CSPRNG is not a recoverable condition.
       const uuid = crypto.randomUUIDv4().pipe(Effect.orDie)
@@ -819,109 +808,17 @@ export class Agent extends Context.Service<Agent, {
         } satisfies SessionSetup
       })
 
-      // --- agent resolution -------------------------------------------------
-
-      const hostLastAgents = Effect.fnUntraced(function*(cwd: string) {
-        const read = (file: string) =>
-          fs.readFileString(file).pipe(
-            Effect.map((text) => decodeSettings(text)),
-            Effect.orElseSucceed(() => Option.none())
-          )
-        const local = yield* read(path.join(cwd, ".letta", "settings.local.json"))
-        const global = yield* read(path.join(host.home, ".letta", "settings.json"))
-        const ids = [
-          ...Option.toArray(local).flatMap((s) => [
-            ...Object.values(s.sessionsByServer ?? {}).map((v) => v.agentId),
-            ...(s.lastSession?.agentId === undefined ? [] : [s.lastSession.agentId]),
-            ...(s.lastAgent === undefined || s.lastAgent === null ? [] : [s.lastAgent])
-          ]),
-          ...Option.toArray(global).flatMap((
-            s
-          ) => (s.lastAgent === undefined || s.lastAgent === null ? [] : [s.lastAgent]))
-        ]
-        return [...new Set(ids)]
-      })
-
-      const resolveAgent = Effect.fnUntraced(function*(conn: LettaConnection, cwd: string, create: boolean) {
-        if (Option.isSome(config.agentId)) return Option.some(config.agentId.value)
-        const cached = agentsByCwd.get(cwd)
-        if (cached !== undefined) return Option.some(cached)
-        for (const candidate of yield* hostLastAgents(cwd)) {
-          const found = yield* conn.call(
-            (request_id) => ({ type: "agent_retrieve", request_id, agent_id: candidate }),
-            AgentRetrieveResponse,
-            {
-              timeout: "20 seconds"
-            }
-          ).pipe(Effect.map((r) => r.agent !== null), Effect.orElseSucceed(() => false))
-          if (found) {
-            agentsByCwd.set(cwd, candidate)
-            yield* Effect.logInfo(`Using the host's last Letta agent ${candidate}`)
-            return Option.some(candidate)
-          }
-        }
-        if (!create) return Option.none<string>()
-        const created = yield* conn.call(
-          (request_id) => ({
-            type: "create_agent",
-            request_id,
-            personality: "memo",
-            pin_global: true,
-            ...(Option.isSome(config.model) ? { model: config.model.value } : {})
-          }),
-          CreateAgentResponse,
-          { timeout: "2 minutes" }
-        ).pipe(Effect.mapError(unavailable))
-        if (created.agent_id === undefined || created.agent_id === null) {
-          return yield* new AgentUnavailable({
-            message: created.error ?? "Letta Code could not create an agent",
-            auth: false
-          })
-        }
-        agentsByCwd.set(cwd, created.agent_id)
-        yield* Effect.logWarning(
-          `Created Letta agent ${created.agent_id}. Set LETTA_AGENT_ID=${created.agent_id} to keep talking to it.`
-        )
-        return Option.some(created.agent_id)
-      })
-
-      /** The agent's state, which also confirms that it exists. */
-      const retrieveAgent = (conn: LettaConnection, agentId: string) =>
-        conn.call(
-          (request_id) => ({ type: "agent_retrieve", request_id, agent_id: agentId }),
-          AgentRetrieveResponse,
-          { timeout: "20 seconds" }
-        ).pipe(
-          Effect.mapError(unavailable),
-          Effect.flatMap((response) =>
-            response.agent === null
-              ? Effect.fail(new AgentUnavailable({ message: `Letta has no agent ${agentId}`, auth: false }))
-              : Effect.succeed(response.agent)
-          )
-        )
-
       // --- history ----------------------------------------------------------
 
+      /** Emits the conversation's history (its latest 1,000 messages), oldest first. */
       const replay = Effect.fnUntraced(function*(session: Session, conn: LettaConnection, conversationId: string) {
-        const rows: Array<unknown> = []
-        let before: string | undefined
-        for (let page = 0; page < 10; page++) {
-          const response = yield* conn.call(
-            (request_id) => ({
-              type: "conversation_messages_list",
-              request_id,
-              conversation_id: conversationId,
-              query: { limit: 100, order: "desc", ...(before === undefined ? {} : { before }) }
-            }),
-            ConversationMessagesListResponse,
-            { timeout: "60 seconds" }
-          ).pipe(Effect.mapError(unavailable))
-          rows.push(...response.messages)
-          if (response.has_more !== true || response.next_before === undefined || response.next_before === null) break
-          before = response.next_before
-        }
+        const pages = yield* History.pages(conn, conversationId).pipe(
+          Stream.take(10),
+          Stream.runCollect,
+          Effect.mapError(unavailable)
+        )
         const history = Translator.make(translatorContext(session.cwd, session.settings, session.mcp))
-        for (const row of rows.toReversed()) yield* emitAll(session, history.history(row))
+        for (const row of pages.flat().toReversed()) yield* emitAll(session, history.history(row))
         yield* emitAll(session, history.finishTurn("end_turn"))
       })
 
@@ -942,11 +839,11 @@ export class Agent extends Context.Service<Agent, {
           const [conn, mcp] = yield* Effect.all([connection, connectMcp(input.mcpServers, input.cwd, scope)], {
             concurrency: "unbounded"
           })
-          const agentId = yield* resolveAgent(conn, input.cwd, false)
+          const agentId = yield* agents.find(conn, input.cwd)
           const [agent, models] = yield* Effect.all([
             Option.match(agentId, {
               onNone: () => Effect.succeedNone,
-              onSome: (id) => retrieveAgent(conn, id).pipe(Effect.asSome)
+              onSome: (id) => agents.retrieve(conn, id).pipe(Effect.asSome)
             }),
             settings.catalog(conn)
           ], { concurrency: "unbounded" })
@@ -998,7 +895,7 @@ export class Agent extends Context.Service<Agent, {
         const conn = yield* connection
         const agentId = Option.isSome(session.agentId)
           ? session.agentId.value
-          : Option.getOrThrow(yield* resolveAgent(conn, session.cwd, true))
+          : yield* agents.findOrCreate(conn, session.cwd)
         const started = yield* startRuntime(conn, session.scope, {
           agentId,
           conversationId: Option.none(),
@@ -1089,7 +986,7 @@ export class Agent extends Context.Service<Agent, {
           ).pipe(Effect.mapError(() => notFound))
           const conversation = retrieved.conversation
           if (conversation === null) return yield* notFound
-          const agentId = conversation.agent_id ?? Option.getOrUndefined(yield* resolveAgent(conn, cwd, false))
+          const agentId = conversation.agent_id ?? Option.getOrUndefined(yield* agents.find(conn, cwd))
           if (agentId === undefined) return yield* notFound
           return { agentId, conversation }
         }
@@ -1138,7 +1035,7 @@ export class Agent extends Context.Service<Agent, {
         readonly cursor: Option.Option<string>
       }) {
         const conn = yield* connection
-        const agentId = yield* resolveAgent(conn, Option.getOrElse(input.cwd, () => host.cwd), false)
+        const agentId = yield* agents.find(conn, Option.getOrElse(input.cwd, () => host.cwd))
         if (Option.isNone(agentId)) return { sessions: [], nextCursor: Option.none<string>() }
         const limit = 50
         const response = yield* conn.call(

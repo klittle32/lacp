@@ -367,6 +367,28 @@ describe("ACP v1 sessions", () => {
       assert.strictEqual(missing.error?.code, -32002)
     }))
 
+  it.live("replays a history Letta returns in several pages, oldest first", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const message = (id: string) => ({ id, message_type: "assistant_message", content: `Message ${id}`, date: "" })
+      yield* fake.on("conversation_messages_list", (command: any) =>
+        command.query.before === undefined
+          ? { success: true, has_more: true, next_before: "m3", messages: [message("m4"), message("m3")] }
+          : { success: true, has_more: false, next_before: null, messages: [message("m2"), message("m1")] })
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeV1)
+      yield* client.request("session/load", { sessionId: "conv-old", cwd: "/work", mcpServers: [] })
+      const replayed = (yield* client.updates).filter((u) => u.sessionUpdate === "agent_message_chunk")
+      assert.deepStrictEqual(replayed.map((u) => u.content.text), [
+        "Message m1",
+        "Message m2",
+        "Message m3",
+        "Message m4"
+      ])
+      const requests = (yield* Ref.get(fake.commands)).filter((c) => c.type === "conversation_messages_list")
+      assert.deepStrictEqual(requests.map((c: any) => c.query.before), [undefined, "m3"])
+    }))
+
   it.live("lists sessions for a project", () =>
     Effect.gen(function*() {
       const client = yield* start(yield* Fake.make, { agentId: Option.some(Fake.AGENT_ID) })

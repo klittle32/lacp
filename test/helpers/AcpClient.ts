@@ -8,6 +8,7 @@ import { type Cause, Context, Deferred, Effect, Layer, Option, PubSub, Queue, Re
 import { FetchHttpClient } from "effect/http"
 import { AcpServer } from "../../src/agent/AcpServer.ts"
 import { Agent } from "../../src/agent/Agent.ts"
+import { AgentResolver } from "../../src/agent/AgentResolver.ts"
 import { AcpClient } from "../../src/agent/Client.ts"
 import { SessionIds } from "../../src/agent/SessionIds.ts"
 import { Settings } from "../../src/agent/Settings.ts"
@@ -82,6 +83,7 @@ export const startWith = <E>(
       Layer.provide(Agent.layer),
       Layer.provide(Settings.layer),
       Layer.provide(SessionIds.layer),
+      Layer.provide(AgentResolver.layer),
       Layer.provide(FetchHttpClient.layer),
       Layer.provide(appServer),
       Layer.provideMerge(AcpClient.layer),

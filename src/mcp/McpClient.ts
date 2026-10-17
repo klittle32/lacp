@@ -2,9 +2,10 @@
  * A Model Context Protocol client connection: initialization, tool discovery
  * (with pagination and `list_changed`), and tool calls.
  */
-import { type Duration, Effect, PubSub, Ref, type Scope } from "effect"
+import { type Duration, Effect, Option, PubSub, Ref, type Scope, Stream } from "effect"
 import type { HttpClient } from "effect/http"
 import type { ChildProcessSpawner } from "effect/process"
+import type { RpcError } from "../jsonrpc/JsonRpc.ts"
 import * as Method from "../jsonrpc/Method.ts"
 import { makePeer, McpCancelled } from "../jsonrpc/Peer.ts"
 import { Transport } from "../jsonrpc/Transport.ts"
@@ -53,19 +54,27 @@ export const connect = Effect.fnUntraced(function*(server: McpServerConfig, opti
   const tools = yield* Ref.make<ReadonlyArray<Mcp.Tool>>([])
   const changes = yield* PubSub.unbounded<ReadonlyArray<Mcp.Tool>>()
 
-  const listAll = Effect.gen(function*() {
-    const all: Array<Mcp.Tool> = []
-    let cursor: string | undefined
-    for (let page = 0; page < MAX_PAGES; page++) {
-      const result = yield* peer.request(Mcp.ListTools, cursor === undefined ? {} : { cursor }, {
-        timeout: "30 seconds"
-      })
-      all.push(...result.tools)
-      if (result.nextCursor === undefined || result.nextCursor === "") break
-      cursor = result.nextCursor
-    }
-    return all
-  }).pipe(Effect.mapError((error) => failure(`tools/list failed: ${error.message}`)))
+  /** Every tool, from up to `MAX_PAGES` pages; each request's params carry the cursor of the page before. */
+  const listAll = Stream.paginate<typeof Mcp.ListToolsParams.Type, ReadonlyArray<Mcp.Tool>, RpcError>(
+    {},
+    (params) =>
+      peer.request(Mcp.ListTools, params, { timeout: "30 seconds" }).pipe(
+        Effect.map((result) =>
+          [
+            [result.tools],
+            Option.fromUndefinedOr(result.nextCursor).pipe(
+              Option.filter((cursor) => cursor !== ""),
+              Option.map((cursor) => ({ cursor }))
+            )
+          ] as const
+        )
+      )
+  ).pipe(
+    Stream.take(MAX_PAGES),
+    Stream.runCollect,
+    Effect.map((pages) => pages.flat()),
+    Effect.mapError((error) => failure(`tools/list failed: ${error.message}`))
+  )
 
   const refresh = listAll.pipe(
     Effect.tap((list) => Ref.set(tools, list)),
