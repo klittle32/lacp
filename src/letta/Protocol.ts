@@ -458,8 +458,6 @@ export type RuntimeFrame = typeof RuntimeFrame.Type
 
 // --- stream_delta payloads (`delta.message_type`) ---
 
-export const DeltaHeader = Schema.Struct({ message_type: Schema.String })
-
 export const TextPart = Schema.Struct({ type: Schema.Literal("text"), text: Schema.String })
 const MessageContent = Schema.Union([Schema.String, Schema.Array(Schema.Union([TextPart, Schema.Unknown]))])
 
@@ -532,12 +530,6 @@ export const CommandEnd = Schema.Struct({
   success: opt(Schema.Boolean)
 })
 
-export const StatusDelta = Schema.Struct({
-  message_type: Schema.Literal("status"),
-  message: Schema.String,
-  level: opt(Schema.String)
-})
-
 export const RetryDelta = Schema.Struct({
   message_type: Schema.Literal("retry"),
   message: Schema.String,
@@ -574,3 +566,21 @@ export const UsageDelta = Schema.Struct({
   message_type: Schema.Literal("usage_statistics"),
   ...LettaUsage.fields
 })
+
+/** The `stream_delta` payloads lacp translates, told apart by `message_type`. */
+export const Delta = Schema.Union([
+  AssistantDelta,
+  ReasoningDelta,
+  UserDelta,
+  ToolCallDelta,
+  ToolReturnDelta,
+  ClientToolStart,
+  ClientToolEnd,
+  CommandEnd,
+  RetryDelta,
+  EventMessageDelta,
+  LoopErrorDelta,
+  ErrorDelta,
+  UsageDelta
+])
+export type Delta = typeof Delta.Type

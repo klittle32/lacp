@@ -10,7 +10,7 @@
  * One translator lives per ACP session. It is synchronous and keeps only the
  * state needed to produce correct upserts, which keeps it easy to test.
  */
-import { Array as Arr, Option, type Path, Schema } from "effect"
+import { Array as Arr, Match, Option, type Path, Schema } from "effect"
 import * as Content from "../acp/Content.ts"
 import type { ToolKind } from "../acp/Content.ts"
 import type {
@@ -24,22 +24,14 @@ import type {
   ToolContent
 } from "../domain/Events.ts"
 import {
-  AssistantDelta,
-  ClientToolEnd,
-  ClientToolStart,
-  CommandEnd,
+  type ClientToolStart,
+  type CommandEnd,
   type ControlRequest,
-  DeltaHeader,
-  ErrorDelta,
-  EventMessageDelta,
-  LoopErrorDelta,
-  ReasoningDelta,
-  RetryDelta,
+  Delta,
   TextPart,
-  ToolCallDelta,
-  ToolReturnDelta,
-  UsageDelta,
-  UserDelta
+  type ToolCallDelta,
+  type ToolReturnDelta,
+  type UsageDelta
 } from "./Protocol.ts"
 import * as Tools from "./Tools.ts"
 
@@ -123,21 +115,7 @@ const LIVE_OUTPUT_PREFIX = "synthetic-tool-return-stream-"
 const MAX_OUTPUT = 20_000
 const PLAN_ID = "plan"
 
-const decode = <S extends Schema.Codec<unknown, unknown>>(schema: S) => Schema.decodeUnknownOption(schema)
-const decodeHeader = decode(DeltaHeader)
-const decodeAssistant = decode(AssistantDelta)
-const decodeReasoning = decode(ReasoningDelta)
-const decodeUser = decode(UserDelta)
-const decodeToolCall = decode(ToolCallDelta)
-const decodeToolReturn = decode(ToolReturnDelta)
-const decodeClientToolStart = decode(ClientToolStart)
-const decodeClientToolEnd = decode(ClientToolEnd)
-const decodeCommandEnd = decode(CommandEnd)
-const decodeRetry = decode(RetryDelta)
-const decodeEventMessage = decode(EventMessageDelta)
-const decodeLoopError = decode(LoopErrorDelta)
-const decodeError = decode(ErrorDelta)
-const decodeUsage = decode(UsageDelta)
+const decodeDelta = Schema.decodeUnknownOption(Delta)
 const decodeArguments = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))
 const isTextPart = Schema.is(TextPart)
 
@@ -402,115 +380,67 @@ export const make = (context: TranslatorContext): Translator => {
     return true
   }
 
-  const translate = (delta: unknown): Array<TranslatedEvent> => {
-    const header = decodeHeader(delta)
-    if (Option.isNone(header)) return []
-    const event = (e: SessionEvent): TranslatedEvent => ({ _tag: "Event", event: e })
-    const events = (es: ReadonlyArray<SessionEvent>) => es.map(event)
-    switch (header.value.message_type) {
-      case "assistant_message":
-        return Option.match(decodeAssistant(delta), {
-          onNone: () => [],
-          onSome: (d) => {
-            const text = contentText(d.content)
-            if (text === "" || !fresh("assistant", d.run_id, d.seq_id, d.otid ?? d.id)) return []
-            return [event({ _tag: "AgentMessageChunk", messageId: d.otid ?? d.id, content: Content.text(text) })]
-          }
-        })
-      case "reasoning_message":
-        return Option.match(decodeReasoning(delta), {
-          onNone: () => [],
-          onSome: (d) => {
-            if (d.reasoning === "" || !fresh("reasoning", d.run_id, d.seq_id, d.otid ?? d.id)) return []
-            return [event({ _tag: "AgentThoughtChunk", messageId: d.otid ?? d.id, content: Content.text(d.reasoning) })]
-          }
-        })
-      case "user_message":
-        return Option.match(decodeUser(delta), {
-          onNone: () => [],
-          onSome: (d): Array<TranslatedEvent> => {
-            const raw = contentText(d.content)
-            const reported = reportedSubagents(raw)
-            const text = stripInjected(raw)
-            return [
-              ...(reported.length > 0 ? [{ _tag: "SubagentsReported", subagentIds: reported } as const] : []),
-              ...(text === "" ? [] : [
-                {
-                  _tag: "UserEcho",
-                  otid: Option.fromNullishOr(d.otid),
-                  event: { _tag: "UserMessageChunk", messageId: d.otid ?? d.id, content: Content.text(text) }
-                } as const
-              ])
-            ]
-          }
-        })
-      case "tool_call_message":
-      case "approval_request_message":
-        return Option.match(decodeToolCall(delta), { onNone: () => [], onSome: (d) => events(onToolCall(d)) })
-      case "client_tool_start":
-        return Option.match(decodeClientToolStart(delta), { onNone: () => [], onSome: (d) => events(onToolStart(d)) })
-      case "client_tool_end":
-        return Option.match(decodeClientToolEnd(delta), {
-          onNone: () => [],
-          onSome: (d) => {
-            tool(d.tool_call_id).started = true
-            return []
-          }
-        })
-      case "tool_return_message":
-        return Option.match(decodeToolReturn(delta), { onNone: () => [], onSome: (d) => events(onToolReturn(d)) })
-      case "slash_command_end":
-      case "command_end":
-        return Option.match(decodeCommandEnd(delta), {
-          onNone: () => [],
-          onSome: (d) =>
-            d.output === undefined || d.output === ""
-              ? []
-              : [
-                event({
-                  _tag: "AgentMessageChunk",
-                  messageId: `command-${d.command_id}`,
-                  content: Content.text(d.output)
-                })
-              ]
-        })
-      case "retry":
-        return Option.match(decodeRetry(delta), { onNone: () => [], onSome: (d) => [event(retryNotice(d))] })
-      case "event_message":
-        return Option.match(decodeEventMessage(delta), {
-          onNone: () => [],
-          onSome: (d) => d.event_type === "retry" ? [event(retryNotice(d.event_data ?? {}))] : []
-        })
-      case "loop_error":
-        return Option.match(decodeLoopError(delta), {
-          onNone: () => [],
-          onSome: (d) => [{
-            _tag: "LoopError",
-            message: d.message,
-            terminal: d.is_terminal ?? true,
-            clientMessageIds: d.client_message_ids ?? []
-          }]
-        })
-      case "error_message":
-        return Option.match(decodeError(delta), {
-          onNone: () => [],
-          onSome: (
-            d
-          ) => [
-            event({
-              _tag: "Notice",
-              severity: "error",
-              title: d.message,
-              ...(d.detail ? { description: d.detail } : {})
-            })
-          ]
-        })
-      case "usage_statistics":
-        return Option.match(decodeUsage(delta), { onNone: () => [], onSome: (d) => events(usage(d)) })
-      default:
+  const event = (e: SessionEvent): TranslatedEvent => ({ _tag: "Event", event: e })
+  const events = (es: ReadonlyArray<SessionEvent>) => es.map(event)
+
+  const translateDelta: (delta: Delta) => ReadonlyArray<TranslatedEvent> = Match.type<Delta>().pipe(
+    Match.discriminatorsExhaustive("message_type")({
+      assistant_message: (d) => {
+        const text = contentText(d.content)
+        if (text === "" || !fresh("assistant", d.run_id, d.seq_id, d.otid ?? d.id)) return []
+        return [event({ _tag: "AgentMessageChunk", messageId: d.otid ?? d.id, content: Content.text(text) })]
+      },
+      reasoning_message: (d) => {
+        if (d.reasoning === "" || !fresh("reasoning", d.run_id, d.seq_id, d.otid ?? d.id)) return []
+        return [event({ _tag: "AgentThoughtChunk", messageId: d.otid ?? d.id, content: Content.text(d.reasoning) })]
+      },
+      user_message: (d): ReadonlyArray<TranslatedEvent> => {
+        const raw = contentText(d.content)
+        const reported = reportedSubagents(raw)
+        const text = stripInjected(raw)
+        return [
+          ...(reported.length > 0 ? [{ _tag: "SubagentsReported", subagentIds: reported } as const] : []),
+          ...(text === "" ? [] : [
+            {
+              _tag: "UserEcho",
+              otid: Option.fromNullishOr(d.otid),
+              event: { _tag: "UserMessageChunk", messageId: d.otid ?? d.id, content: Content.text(text) }
+            } as const
+          ])
+        ]
+      },
+      tool_call_message: (d) => events(onToolCall(d)),
+      approval_request_message: (d) => events(onToolCall(d)),
+      client_tool_start: (d) => events(onToolStart(d)),
+      client_tool_end: (d) => {
+        tool(d.tool_call_id).started = true
         return []
-    }
-  }
+      },
+      tool_return_message: (d) => events(onToolReturn(d)),
+      slash_command_end: (d) => commandOutput(d),
+      command_end: (d) => commandOutput(d),
+      retry: (d) => [event(retryNotice(d))],
+      event_message: (d) => d.event_type === "retry" ? [event(retryNotice(d.event_data ?? {}))] : [],
+      loop_error: (d) => [{
+        _tag: "LoopError",
+        message: d.message,
+        terminal: d.is_terminal ?? true,
+        clientMessageIds: d.client_message_ids ?? []
+      }],
+      error_message: (d) => [
+        event({ _tag: "Notice", severity: "error", title: d.message, ...(d.detail ? { description: d.detail } : {}) })
+      ],
+      usage_statistics: (d) => events(usage(d))
+    })
+  )
+
+  const commandOutput = (d: typeof CommandEnd.Type): ReadonlyArray<TranslatedEvent> =>
+    d.output === undefined || d.output === ""
+      ? []
+      : [event({ _tag: "AgentMessageChunk", messageId: `command-${d.command_id}`, content: Content.text(d.output) })]
+
+  const translate = (delta: unknown): ReadonlyArray<TranslatedEvent> =>
+    Option.match(decodeDelta(delta), { onNone: () => [], onSome: translateDelta })
 
   return {
     delta: translate,
