@@ -14,6 +14,7 @@ import {
   Effect,
   Equal,
   Exit,
+  FiberHandle,
   FiberSet,
   Layer,
   Match,
@@ -31,14 +32,7 @@ import { ChildProcessSpawner } from "effect/process"
 import type { ContentBlock } from "../acp/Content.ts"
 import * as Content from "../acp/Content.ts"
 import { LacpConfig } from "../Config.ts"
-import type {
-  Command,
-  ConfigOption,
-  ErrorInfo,
-  PermissionDecision,
-  SessionEvent,
-  StopReason
-} from "../domain/Events.ts"
+import type { Command, ConfigOption, PermissionDecision, SessionEvent } from "../domain/Events.ts"
 import { Host } from "../Host.ts"
 import { type Frame, LettaAppServer, type LettaConnection } from "../letta/AppServer.ts"
 import * as Commands from "../letta/Commands.ts"
@@ -83,6 +77,8 @@ import {
   Settings,
   type Target
 } from "./Settings.ts"
+import * as Turn from "./Turn.ts"
+import type { TurnResult } from "./Turn.ts"
 
 // ---------------------------------------------------------------------------
 // Public model
@@ -94,10 +90,7 @@ export interface SessionSetup {
   readonly commands: ReadonlyArray<Command>
 }
 
-export interface TurnResult {
-  readonly stopReason: StopReason
-  readonly error: Option.Option<ErrorInfo>
-}
+export type { TurnResult } from "./Turn.ts"
 
 export interface PromptHandle {
   /** The id of the inserted user message. */
@@ -120,29 +113,6 @@ const decodeDeltaRun = Schema.decodeUnknownOption(Schema.Struct({ run_id: Schema
 // Session state
 // ---------------------------------------------------------------------------
 
-interface Turn {
-  readonly clientMessageId: string
-  /** Letta acknowledged the input (`input_accepted`). */
-  accepted: boolean
-  /** A `turn_finished` that raced ahead of the acknowledgement. */
-  early: Option.Option<TurnFinished>
-  started: boolean
-  error: Option.Option<string>
-  readonly done: Deferred.Deferred<TurnResult>
-  /** Letta runs seen in this turn's stream, so a turn ended locally can disown them. */
-  readonly runs: Set<string>
-  /** Background subagents already running when the turn began; the turn does not wait for them. */
-  readonly preexisting: ReadonlySet<string>
-  /**
-   * The result Letta reported, held while background work the turn started is
-   * outstanding: its report arrives in a follow-up turn, which the client only
-   * shows while this turn is open.
-   */
-  held: Option.Option<TurnResult>
-  /** A follow-up turn has started streaming into the held turn. */
-  followUp: boolean
-}
-
 interface Attachment {
   readonly generation: number
   readonly scope: Scope.Closeable
@@ -163,6 +133,8 @@ interface Session {
   readonly translator: Translator.Translator
   readonly turnLock: Semaphore.Semaphore
   readonly permissions: FiberSet.FiberSet<void, never>
+  /** The grace period of a held turn whose background work is done (see releaseWhenSettled). */
+  readonly grace: FiberHandle.FiberHandle<void, never>
   /** The runtime of the session's Letta conversation; none until the session has a conversation. */
   attachment: Option.Option<Attachment>
   /** Serializes creating the conversation with config changes made meanwhile. */
@@ -181,7 +153,7 @@ interface Session {
   queuedNotifications: number
   /** The client's MCP servers this session was opened with. */
   readonly mcpServers: ReadonlyArray<McpServerConfig>
-  turn: Option.Option<Turn>
+  turn: Option.Option<Turn.Turn>
   foreground: "idle" | "running" | "requires_action"
   readonly deviceStatus: Deferred.Deferred<void>
   localCommand: boolean
@@ -306,12 +278,12 @@ export class Agent extends Context.Service<Agent, {
         const turn = session.turn
         // Nothing is running, so this is the late end of a turn lacp ended before seeing any of its runs.
         if (Option.isNone(turn) && session.foreground === "idle") return
-        if (Option.isSome(turn) && !turn.value.accepted) {
-          turn.value.early = Option.some(frame)
+        if (Option.isSome(turn) && turn.value.phase._tag === "Submitted") {
+          turn.value.phase = Turn.Phase.Submitted({ ...turn.value.phase, early: Option.some(frame) })
           return
         }
         // A turn that finished before ours was dequeued belongs to earlier (background) work.
-        if (Option.isSome(turn) && !turn.value.started) return
+        if (Option.isSome(turn) && turn.value.phase._tag === "Queued") return
         const stopReason = Translator.stopReasonOf(frame.stop_reason)
         const message = frame.error ?? Option.getOrUndefined(Option.flatMap(turn, (t) => t.error))
         if (frame.usage !== undefined && frame.usage !== null && Option.isSome(session.settings.contextWindow)) {
@@ -328,41 +300,43 @@ export class Agent extends Context.Service<Agent, {
         }
         // A cancelled turn ends now, whatever is still running in the background.
         if (stopReason !== "cancelled" && Option.isSome(turn) && awaitsBackground(session, turn.value)) {
-          if (Option.isNone(turn.value.held)) {
+          if (turn.value.phase._tag !== "Held") {
             yield* Effect.logInfo(`Keeping the turn open until its background work in ${session.id} reports back`)
           }
-          turn.value.held = Option.some(result)
-          turn.value.followUp = false
+          turn.value.phase = Turn.Phase.Held({ result, followUp: false })
           return
         }
         yield* completeTurn(session, result)
       })
 
       /** Whether a turn has background work outstanding that will report back into the conversation. */
-      const awaitsBackground = (session: Session, turn: Turn) =>
+      const awaitsBackground = (session: Session, turn: Turn.Turn) =>
         config.waitForBackground &&
         (session.queuedNotifications > 0 ||
           Array.from(session.backgroundSubagents).some((id) => !turn.preexisting.has(id)))
 
+      /** Whether `turn` still only waits for background work that is done. */
+      const settled = (session: Session, turn: Turn.Turn) =>
+        Option.exists(session.turn, (current) => current === turn) && Turn.waitingForBackground(turn) &&
+        !awaitsBackground(session, turn)
+
       /**
        * Ends a held turn once its background work is done. The report starts a
        * follow-up turn, whose end ends the held turn; if none starts within the
-       * grace period, the held result stands.
+       * grace period (counted from the last sign that the work is done), the
+       * held result stands.
        */
       const releaseWhenSettled = (session: Session) =>
         Effect.suspend(() => {
           const turn = Option.getOrUndefined(session.turn)
-          if (turn === undefined || Option.isNone(turn.held) || turn.followUp || awaitsBackground(session, turn)) {
-            return Effect.void
-          }
+          if (turn === undefined || !settled(session, turn)) return Effect.void
           return Effect.sleep(config.backgroundGrace).pipe(
             Effect.andThen(Effect.suspend(() =>
-              Option.exists(session.turn, (current) => current === turn) && Option.isSome(turn.held) &&
-                !turn.followUp && !awaitsBackground(session, turn)
-                ? completeTurn(session, turn.held.value)
+              settled(session, turn) && turn.phase._tag === "Held"
+                ? completeTurn(session, turn.phase.result)
                 : Effect.void
             )),
-            Effect.forkIn(session.scope),
+            FiberHandle.run(session.grace),
             Effect.asVoid
           )
         })
@@ -418,7 +392,9 @@ export class Agent extends Context.Service<Agent, {
         // Output of a turn lacp already ended (a cancel Letta never confirmed) is dropped.
         if (Option.isSome(run) && session.abandonedRuns.has(run.value)) return
         if (Option.isSome(run) && Option.isSome(session.turn)) session.turn.value.runs.add(run.value)
-        if (Option.isSome(session.turn) && Option.isSome(session.turn.value.held)) session.turn.value.followUp = true
+        if (Option.isSome(session.turn) && session.turn.value.phase._tag === "Held") {
+          session.turn.value.phase = Turn.Phase.Held({ ...session.turn.value.phase, followUp: true })
+        }
         for (const item of session.translator.delta(frame.delta)) {
           switch (item._tag) {
             case "SubagentsReported": {
@@ -436,7 +412,7 @@ export class Agent extends Context.Service<Agent, {
                   Option.isSome(session.turn) &&
                   session.turn.value.clientMessageId === Option.getOrUndefined(item.otid)
                 ) {
-                  session.turn.value.started = true
+                  Turn.start(session.turn.value)
                 }
                 continue
               }
@@ -451,7 +427,7 @@ export class Agent extends Context.Service<Agent, {
                 continue
               }
               turn.value.error = Option.some(item.message)
-              if (!turn.value.started && item.clientMessageIds.includes(turn.value.clientMessageId)) {
+              if (!Turn.started(turn.value) && item.clientMessageIds.includes(turn.value.clientMessageId)) {
                 yield* completeTurn(session, {
                   stopReason: "error",
                   error: Option.some({ code: -32603, message: item.message })
@@ -553,7 +529,7 @@ export class Agent extends Context.Service<Agent, {
         if (Option.isNone(turn)) return
         for (const removed of frame.removed ?? []) {
           if (removed.client_message_id !== turn.value.clientMessageId) continue
-          if (removed.disposition === "dequeued") turn.value.started = true
+          if (removed.disposition === "dequeued") Turn.start(turn.value)
           if (removed.disposition === "cancelled") {
             yield* completeTurn(session, { stopReason: "cancelled", error: Option.none() })
           }
@@ -734,6 +710,7 @@ export class Agent extends Context.Service<Agent, {
           translator: Translator.make(translatorContext(input.cwd, input.settings, input.mcp)),
           turnLock: yield* Semaphore.make(1),
           permissions: yield* Scope.provide(FiberSet.make<void, never>(), input.scope),
+          grace: yield* Scope.provide(FiberHandle.make<void, never>(), input.scope),
           attachment: Option.none(),
           setupLock: yield* Semaphore.make(1),
           announced: false,
@@ -1087,17 +1064,13 @@ export class Agent extends Context.Service<Agent, {
 
       /** Makes a new turn the session's turn. */
       const beginTurn = Effect.fnUntraced(function*(session: Session, state: { readonly accepted: boolean }) {
-        const turn: Turn = {
+        const turn: Turn.Turn = {
           clientMessageId: yield* uuid,
-          accepted: state.accepted,
-          early: Option.none(),
-          started: state.accepted,
-          error: Option.none(),
           done: yield* Deferred.make<TurnResult>(),
           runs: new Set(),
           preexisting: new Set(session.backgroundSubagents),
-          held: Option.none(),
-          followUp: false
+          phase: state.accepted ? Turn.Phase.Running() : Turn.Phase.Submitted({ started: false, early: Option.none() }),
+          error: Option.none()
         }
         session.turn = Option.some(turn)
         return turn
@@ -1108,7 +1081,7 @@ export class Agent extends Context.Service<Agent, {
        * turn, not the request: it is released when the turn ends, so a turn
        * that was cancelled cannot hold up the next prompt.
        */
-      const handleOf = (session: Session, turn: Turn, release: Effect.Effect<void>) =>
+      const handleOf = (session: Session, turn: Turn.Turn, release: Effect.Effect<void>) =>
         Deferred.await(turn.done).pipe(
           Effect.ensuring(release),
           Effect.forkIn(session.scope),
@@ -1196,12 +1169,12 @@ export class Agent extends Context.Service<Agent, {
             yield* withdraw
             return yield* new PromptRejected({ message: accepted.error ?? "Letta Code did not accept the prompt" })
           }
-          turn.accepted = true
-          turn.started = turn.started || accepted.disposition !== "queued"
+          const early = turn.phase._tag === "Submitted" ? turn.phase.early : Option.none()
+          Turn.accept(turn, accepted.disposition === "queued")
           yield* emit(session, { _tag: "UserMessage", messageId: clientMessageId, content: blocks })
           yield* setForeground(session, "running")
           // With nothing ahead of it in Letta's queue, an early turn_finished can only be ours.
-          if (Option.isSome(turn.early) && turn.started) yield* onTurnFinished(session, turn.early.value)
+          if (Option.isSome(early) && Turn.started(turn)) yield* onTurnFinished(session, early.value)
           return yield* handleOf(session, turn, release)
         }).pipe(Effect.onError(() => release))
       })
@@ -1211,7 +1184,7 @@ export class Agent extends Context.Service<Agent, {
         if (session === undefined || Option.isNone(session.turn)) return
         const turn = session.turn.value
         // Only waiting for background work: stop waiting (the work itself carries on in Letta).
-        if (Option.isSome(turn.held) && !turn.followUp) {
+        if (Turn.waitingForBackground(turn)) {
           yield* completeTurn(session, { stopReason: "cancelled", error: Option.none() })
           return
         }
