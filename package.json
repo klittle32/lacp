@@ -17,7 +17,7 @@
   "scripts": {
     "prepare": "effect-tsgo patch --typescript --oxlint",
     "check": "tsc -p tsconfig.json",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/main.js",
+    "build": "node scripts/build.ts",
     "dev": "node src/main.ts",
     "test": "vitest run",
     "test:watch": "vitest",
