@@ -41,6 +41,24 @@ export interface LettaInstall {
   readonly runtimeReason: string
 }
 
+/**
+ * What to spawn for `install` with `args`. A Windows `.cmd` launcher runs
+ * through `cmd.exe` (`shell`), which takes one command line: Node deprecates
+ * arguments alongside `shell` (DEP0190), so they are quoted into the command.
+ */
+export const spawnable = (
+  install: Pick<LettaInstall, "command" | "prefixArgs" | "shell">,
+  args: ReadonlyArray<string>
+): { readonly command: string; readonly args: ReadonlyArray<string>; readonly shell: boolean } => {
+  const all = [...install.prefixArgs, ...args]
+  return install.shell
+    ? { command: [install.command, ...all].map(cmdQuote).join(" "), args: [], shell: true }
+    : { command: install.command, args: all, shell: false }
+}
+
+/** Quotes a `cmd.exe` command-line word when it needs it. */
+const cmdQuote = (word: string) => (/[\s&|<>^()]/.test(word) ? `"${word}"` : word)
+
 export interface RuntimeChoice {
   readonly runtime: "node" | "bun"
   readonly path: string
@@ -132,13 +150,14 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
 
       const needsShell = (command: string) => windows && command.toLowerCase().endsWith(".cmd")
 
-      const run = (command: string, args: ReadonlyArray<string>, timeout: Duration.Input) =>
-        spawner.string(
-          ChildProcess.make(command, args, {
+      const run = (command: string, args: ReadonlyArray<string>, timeout: Duration.Input) => {
+        const launch = spawnable({ command, prefixArgs: [], shell: needsShell(command) }, args)
+        return spawner.string(
+          ChildProcess.make(launch.command, launch.args, {
             // The host's environment, not this process's: tests describe hosts without a `letta`.
             env: { ...host.env, DISABLE_AUTOUPDATER: "1", LETTA_CODE_TELEM: "0" },
             extendEnv: false,
-            shell: needsShell(command),
+            shell: launch.shell,
             stdin: "ignore"
           }),
           { includeStderr: true }
@@ -147,6 +166,7 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
           Effect.map(Option.map((out) => out.trim())),
           Effect.orElseSucceed(() => Option.none<string>())
         )
+      }
 
       const pathDirs = (): Array<string> =>
         (host.env["PATH"] ?? host.env["Path"] ?? "").split(windows ? ";" : ":").filter((d) => d !== "")
@@ -232,12 +252,26 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
         })
       )
 
-      /** The JavaScript file behind a candidate (following symlinks and Node/Bun shebangs), if it is one. */
+      /**
+       * The script behind an npm `.cmd` shim on Windows, which runs
+       * `"%_prog%" "%dp0%\node_modules\@letta-ai\letta-code\letta.js" %*`.
+       * Running that script directly needs no `cmd.exe` in between (which
+       * would also outlive a kill of the launcher) and lets the runtime choice apply.
+       */
+      const scriptOfCmdShim = Effect.fnUntraced(function*(shim: string) {
+        const text = yield* fs.readFileString(shim).pipe(Effect.orElseSucceed(() => ""))
+        const target = /"%dp0%\\+([^"\r\n]+\.[cm]?js)"/i.exec(text)?.[1]
+        if (target === undefined) return Option.none<string>()
+        const script = path.join(path.dirname(shim), target)
+        return (yield* isFile(script)) ? Option.some(script) : Option.none<string>()
+      })
+
+      /** The JavaScript file behind a candidate (following symlinks, npm `.cmd` shims and Node/Bun shebangs), if it is one. */
       const scriptOf = Effect.fnUntraced(function*(candidatePath: string) {
         const real = yield* fs.realPath(candidatePath).pipe(Effect.orElseSucceed(() => candidatePath))
         if (/\.[cm]?js$/i.test(real)) return Option.some(real)
-        // Windows launchers (`letta.cmd`) are shims; there only a `letta.js` path selects the runtime.
-        if (windows) return Option.none<string>()
+        // Windows launchers are shims: npm's `.cmd` names its `letta.js`; anything else runs as it is.
+        if (windows) return /\.cmd$/i.test(real) ? yield* scriptOfCmdShim(real) : Option.none<string>()
         const head = yield* fs.open(real).pipe(
           Effect.flatMap((file) => file.readAlloc(128)),
           Effect.scoped,

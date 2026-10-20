@@ -3,7 +3,7 @@ import { assert, describe, it } from "@effect/vitest"
 import { Effect, FileSystem, Layer, Option, Path, Result } from "effect"
 import { LacpConfig } from "../src/Config.ts"
 import { Host, type HostShape } from "../src/Host.ts"
-import { chooseRuntime, compareVersions, LettaExecutable, parseVersion } from "../src/letta/Executable.ts"
+import { chooseRuntime, compareVersions, LettaExecutable, parseVersion, spawnable } from "../src/letta/Executable.ts"
 import * as Login from "../src/letta/Login.ts"
 
 describe("version helpers", () => {
@@ -17,6 +17,27 @@ describe("version helpers", () => {
     assert.isTrue(compareVersions("0.34.15", "0.30.0") > 0)
     assert.isTrue(compareVersions("0.9.0", "0.30.0") < 0)
     assert.strictEqual(compareVersions("1.2.3", "1.2.3"), 0)
+  })
+})
+
+describe("spawnable", () => {
+  it("passes arguments as they are without a shell", () => {
+    assert.deepStrictEqual(spawnable({ command: "/usr/bin/node", prefixArgs: ["/x/letta.js"], shell: false }, ["-v"]), {
+      command: "/usr/bin/node",
+      args: ["/x/letta.js", "-v"],
+      shell: false
+    })
+  })
+
+  it("builds one quoted command line for a Windows `.cmd` launcher", () => {
+    assert.deepStrictEqual(
+      spawnable({ command: "C:\\Program Files\\npm\\letta.cmd", prefixArgs: [], shell: true }, [
+        "server",
+        "--listen",
+        "ws://127.0.0.1:0"
+      ]),
+      { command: "\"C:\\Program Files\\npm\\letta.cmd\" server --listen ws://127.0.0.1:0", args: [], shell: true }
+    )
   })
 })
 

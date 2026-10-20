@@ -8,7 +8,7 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
-import { Effect, FileSystem, Layer, Option, Path } from "effect"
+import { Effect, FileSystem, Layer, Option, Path, Schedule } from "effect"
 import { spawn, spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import type { LettaRuntime } from "../src/Config.ts"
@@ -41,12 +41,25 @@ const serveScriptedModel = Effect.acquireRelease(
 /** Letta's offline deterministic backend, or a model endpoint (an LM Studio base URL) on the local backend. */
 type Backend = { readonly _tag: "Deterministic" } | { readonly _tag: "Model"; readonly lmStudioUrl: string }
 
-const startReal = (lettaRuntime: LettaRuntime = "node", backend: Backend = { _tag: "Deterministic" }) =>
+/** A scoped temporary directory. Removal retries: on Windows a just-killed Letta Code can hold it for a moment. */
+const tempDirectory = (prefix: string) =>
   Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
+    return yield* Effect.acquireRelease(
+      fs.makeTempDirectory({ prefix }),
+      (dir) =>
+        fs.remove(dir, { recursive: true, force: true }).pipe(
+          Effect.retry({ schedule: Schedule.spaced("250 millis"), times: 40 }),
+          Effect.ignore
+        )
+    )
+  })
+
+const startReal = (lettaRuntime: LettaRuntime = "node", backend: Backend = { _tag: "Deterministic" }) =>
+  Effect.gen(function*() {
     const path = yield* Path.Path
-    const home = yield* fs.makeTempDirectoryScoped({ prefix: "lacp-e2e-home-" })
-    const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "lacp-e2e-project-" })
+    const home = yield* tempDirectory("lacp-e2e-home-")
+    const cwd = yield* tempDirectory("lacp-e2e-project-")
     const client = yield* startWith(realLetta, {
       config: {
         auth: "local",
@@ -71,7 +84,8 @@ const startReal = (lettaRuntime: LettaRuntime = "node", backend: Backend = { _ta
             ? { LMSTUDIO_BASE_URL: backend.lmStudioUrl }
             : { LETTA_LOCAL_BACKEND_EXECUTOR: "deterministic-reflection" })
         },
-        execPath: process.execPath
+        execPath: process.execPath,
+        platform: process.platform
       }
     })
     return { client, cwd, path }

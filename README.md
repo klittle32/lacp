@@ -89,9 +89,9 @@ Code's `letta.js` with the runtime that can see your login:
 - `node` or `bun`: always that runtime.
 
 `lacp doctor` shows the runtime it picked, why, and where your login is. `lacp` itself runs on Node either way; this
-setting only decides what runs Letta Code. It applies when `letta` is an npm or Bun install (a link to `letta.js`).
-For other launchers (Volta or pnpm shims, `letta.cmd` on Windows), set `LACP_LETTA_PATH` to the `letta.js` file to
-choose the runtime. Under Bun, Letta Code loads the `.env` files of the folder your editor starts `lacp` in (the
+setting only decides what runs Letta Code. It applies when `letta` is an npm or Bun install (a link to `letta.js`,
+or npm's `letta.cmd` shim on Windows, which `lacp` resolves to its `letta.js`). For other launchers (Volta or pnpm
+shims), set `LACP_LETTA_PATH` to the `letta.js` file to choose the runtime. Under Bun, Letta Code loads the `.env` files of the folder your editor starts `lacp` in (the
 project), as it does in your terminal; under Node it does not. With `LACP_AUTH=cloud-oauth`, `lacp` passes an empty
 `LETTA_API_KEY`, which no `.env` file can override, so your login is used either way.
 
@@ -230,6 +230,10 @@ End-to-end tests drive a real Letta Code with its offline deterministic backend 
 
 ```sh
 LACP_E2E_LETTA="$(command -v letta)" npm test
+```
+
+```powershell
+$env:LACP_E2E_LETTA = (Get-Command letta.cmd).Source; npm test   # Windows
 ```
 
 A smoke test runs this checkout in a real T3 Code. It installs a T3 Code release (the nightly by default, kept in

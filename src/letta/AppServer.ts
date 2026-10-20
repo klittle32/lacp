@@ -27,7 +27,7 @@ import * as Socket from "effect/socket/Socket"
 import { type AuthMode, LacpConfig } from "../Config.ts"
 import { Host } from "../Host.ts"
 import { LettaDisconnected, type LettaError, LettaRequestFailed, LettaStartFailed } from "./Errors.ts"
-import { LettaExecutable, type LettaInstall } from "./Executable.ts"
+import { LettaExecutable, type LettaInstall, spawnable } from "./Executable.ts"
 import * as Login from "./Login.ts"
 import {
   AppServerInfo,
@@ -144,16 +144,16 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
       /** Spawns `letta server --listen` and waits for its WebSocket URL. */
       const spawnServer = Effect.fnUntraced(
         function*(install: LettaInstall, exited: Deferred.Deferred<never, LettaDisconnected>) {
-          const args = [...install.prefixArgs, ...BACKEND_ARGS[config.auth], "server", "--listen", "ws://127.0.0.1:0"]
-          yield* Effect.logInfo(`Starting Letta Code App Server: ${install.command} ${args.join(" ")}`)
+          const launch = spawnable(install, [...BACKEND_ARGS[config.auth], "server", "--listen", "ws://127.0.0.1:0"])
+          yield* Effect.logInfo(`Starting Letta Code App Server: ${[launch.command, ...launch.args].join(" ")}`)
           const keyNote = Login.environmentKeyNote(config.auth, host.env)
           if (Option.isSome(keyNote)) yield* Effect.logInfo(keyNote.value)
           const handle = yield* spawner.spawn(
-            ChildProcess.make(install.command, args, {
+            ChildProcess.make(launch.command, launch.args, {
               cwd: host.cwd,
               env: childEnv(),
               extendEnv: false,
-              shell: install.shell,
+              shell: launch.shell,
               stdin: "ignore",
               stdout: "pipe",
               stderr: "pipe",
@@ -401,12 +401,13 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
             return yield* failed("not available when connecting to LACP_APP_SERVER_URL")
           }
           const install = yield* executable.resolve.pipe(Effect.mapError((error) => failed(error.message)))
+          const launch = spawnable(install, [...BACKEND_ARGS[config.auth], ...args])
           const handle = yield* spawner.spawn(
-            ChildProcess.make(install.command, [...install.prefixArgs, ...BACKEND_ARGS[config.auth], ...args], {
+            ChildProcess.make(launch.command, launch.args, {
               cwd: host.cwd,
               env: childEnv(),
               extendEnv: false,
-              shell: install.shell,
+              shell: launch.shell,
               stdin: "ignore",
               stdout: "pipe",
               stderr: "pipe"

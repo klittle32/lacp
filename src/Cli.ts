@@ -25,7 +25,7 @@ import { Host } from "./Host.ts"
 import { JsonRpcPeer } from "./jsonrpc/Peer.ts"
 import { Transport } from "./jsonrpc/Transport.ts"
 import { layerWebSocket, LettaAppServer } from "./letta/AppServer.ts"
-import { LettaExecutable, type LettaInstall } from "./letta/Executable.ts"
+import { LettaExecutable, type LettaInstall, spawnable } from "./letta/Executable.ts"
 import * as Login from "./letta/Login.ts"
 import { ListModelsResponse, PermissionMode } from "./letta/Protocol.ts"
 import * as LogFile from "./LogFile.ts"
@@ -200,11 +200,11 @@ const setup = Command.make(
   Effect.fnUntraced(function*() {
     const executable = yield* LettaExecutable
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-    const install = yield* executable.resolve
+    const launch = spawnable(yield* executable.resolve, ["setup"])
     const code = yield* spawner.exitCode(
-      ChildProcess.make(install.command, [...install.prefixArgs, "setup"], {
+      ChildProcess.make(launch.command, launch.args, {
         extendEnv: true,
-        shell: install.shell,
+        shell: launch.shell,
         stdin: "inherit",
         stdout: "inherit",
         stderr: "inherit"

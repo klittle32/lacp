@@ -96,8 +96,8 @@ export const startWith = <E>(
       Layer.provide(Transport.layerQueues({ input, output })),
       Layer.provide(LacpConfig.layerTest(options.config ?? {})),
       Layer.provide(Host.layerTest(options.host ?? {})),
-      // The tests describe a POSIX host (`/work`), whatever platform runs them.
-      Layer.provide(NodePath.layerPosix),
+      // Paths follow the described host (POSIX `/work` by default), whatever platform runs the tests.
+      Layer.provide(options.host?.platform === "win32" ? NodePath.layerWin32 : NodePath.layerPosix),
       Layer.provide(NodeServices.layer)
     )
     const context = yield* Layer.build(layer)
