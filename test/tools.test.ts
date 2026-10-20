@@ -1,4 +1,4 @@
-import { NodeServices } from "@effect/platform-node"
+import { NodePath } from "@effect/platform-node"
 import { assert, describe, expect, it } from "@effect/vitest"
 import { Effect, Option, Path } from "effect"
 import * as Tools from "../src/letta/Tools.ts"
@@ -7,7 +7,7 @@ const present = (name: string, input: unknown) =>
   Effect.gen(function*() {
     const path = yield* Path.Path
     return Tools.present(name, input, { cwd: "/work", path })
-  }).pipe(Effect.provide(NodeServices.layer))
+  }).pipe(Effect.provide(NodePath.layerPosix))
 
 describe("Tools.present", () => {
   it.effect("titles and kinds for common tools", () =>

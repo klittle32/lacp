@@ -3,7 +3,7 @@
  * in-memory transport, records every `session/update`, and answers the
  * agent's own requests (permissions) with a configurable policy.
  */
-import { NodeServices } from "@effect/platform-node"
+import { NodePath, NodeServices } from "@effect/platform-node"
 import { type Cause, Context, Deferred, Effect, Layer, Option, PubSub, Queue, Ref, Schema } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { mkdtempSync } from "node:fs"
@@ -96,6 +96,8 @@ export const startWith = <E>(
       Layer.provide(Transport.layerQueues({ input, output })),
       Layer.provide(LacpConfig.layerTest(options.config ?? {})),
       Layer.provide(Host.layerTest(options.host ?? {})),
+      // The tests describe a POSIX host (`/work`), whatever platform runs them.
+      Layer.provide(NodePath.layerPosix),
       Layer.provide(NodeServices.layer)
     )
     const context = yield* Layer.build(layer)

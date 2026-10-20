@@ -20,15 +20,32 @@ describe("version helpers", () => {
   })
 })
 
+/** These tests run against the real platform: on Windows the fakes are `.cmd` launchers and PATH uses `;`. */
+const windows = process.platform === "win32"
+const executableName = (name: string) => (windows ? `${name}.cmd` : name)
+const pathList = (...dirs: ReadonlyArray<string>) => dirs.join(windows ? ";" : ":")
+
+/** Writes a fake `name` executable in `dir` that prints `version` like `letta --version`. */
+const writeFakeLetta = (dir: string, name: string, version: string) =>
+  Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
+    const path = yield* Path.Path
+    const bin = path.join(dir, executableName(name))
+    if (windows) {
+      yield* fs.writeFileString(bin, `@echo ${version} (Letta Code)\r\n`)
+    } else {
+      yield* fs.writeFileString(bin, `#!/bin/sh\necho "${version} (Letta Code)"\n`)
+      yield* fs.chmod(bin, 0o755)
+    }
+    return bin
+  })
+
 /** Writes a fake `letta` that prints `version` and returns its directory. */
 const fakeLetta = (version: string) =>
   Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
-    const path = yield* Path.Path
     const dir = yield* fs.makeTempDirectoryScoped()
-    const bin = path.join(dir, "letta")
-    yield* fs.writeFileString(bin, `#!/bin/sh\necho "${version} (Letta Code)"\n`)
-    yield* fs.chmod(bin, 0o755)
+    const bin = yield* writeFakeLetta(dir, "letta", version)
     return { dir, bin }
   })
 
@@ -43,7 +60,7 @@ const resolveWith = (
   }).pipe(
     Effect.provide(LettaExecutable.layer.pipe(
       Layer.provide(LacpConfig.layerTest(config)),
-      Layer.provide(Host.layerTest({ env, home: "/nonexistent-home", ...host }))
+      Layer.provide(Host.layerTest({ env, home: "/nonexistent-home", platform: process.platform, ...host }))
     ))
   )
 
@@ -51,7 +68,7 @@ describe("LettaExecutable", () => {
   it.live("finds the host's letta on PATH and reads its version", () =>
     Effect.gen(function*() {
       const { bin, dir } = yield* fakeLetta("0.34.15")
-      const install = yield* resolveWith({ PATH: `/nonexistent:${dir}` })
+      const install = yield* resolveWith({ PATH: pathList("/nonexistent", dir) })
       assert.strictEqual(install.path, bin)
       assert.strictEqual(install.command, bin)
       assert.strictEqual(install.version, "0.34.15")
@@ -88,14 +105,11 @@ describe("LettaExecutable caching", () => {
   it.live("looks again after a failed discovery, and keeps a found install", () =>
     Effect.gen(function*() {
       const fs = yield* FileSystem.FileSystem
-      const path = yield* Path.Path
       const dir = yield* fs.makeTempDirectoryScoped()
-      const bin = path.join(dir, "letta")
       yield* Effect.gen(function*() {
         const executable = yield* LettaExecutable
         assert.strictEqual((yield* executable.resolve.pipe(Effect.flip))._tag, "LettaNotFound")
-        yield* fs.writeFileString(bin, `#!/bin/sh\necho "0.34.15 (Letta Code)"\n`)
-        yield* fs.chmod(bin, 0o755)
+        const bin = yield* writeFakeLetta(dir, "letta", "0.34.15")
         assert.strictEqual((yield* executable.resolve).path, bin)
         // Once found, the install is not looked up again.
         yield* fs.remove(bin)
@@ -103,7 +117,7 @@ describe("LettaExecutable caching", () => {
       }).pipe(
         Effect.provide(LettaExecutable.layer.pipe(
           Layer.provide(LacpConfig.layerTest({})),
-          Layer.provide(Host.layerTest({ env: { PATH: dir }, home: "/nonexistent-home" }))
+          Layer.provide(Host.layerTest({ env: { PATH: dir }, home: "/nonexistent-home", platform: process.platform }))
         ))
       )
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
@@ -121,8 +135,9 @@ describe("LettaExecutable with a bare command name", () => {
   it.live("finds other names on PATH too", () =>
     Effect.gen(function*() {
       const fs = yield* FileSystem.FileSystem
+      const path = yield* Path.Path
       const { bin, dir } = yield* fakeLetta("0.34.15")
-      const nightly = `${dir}/letta-nightly`
+      const nightly = path.join(dir, executableName("letta-nightly"))
       yield* fs.rename(bin, nightly)
       const install = yield* resolveWith({ PATH: dir }, { lettaPath: Option.some("letta-nightly") })
       assert.strictEqual(install.path, nightly)
@@ -196,16 +211,20 @@ const scriptInstall = Effect.gen(function*() {
 })
 
 describe("LettaExecutable runtimes", () => {
-  it.live("runs a symlinked letta.js with Bun when the settings file has no login", () =>
-    Effect.gen(function*() {
-      const { bin, bun, home, script } = yield* scriptInstall
-      const host = { home, execPath: process.execPath, runtime: "node" as const }
-      const install = yield* resolveWith({ PATH: bin, HOME: home }, {}, host)
-      assert.strictEqual(install.runtime, "bun")
-      assert.strictEqual(install.command, bun)
-      assert.deepStrictEqual(install.prefixArgs, [script])
-      assert.strictEqual(install.version, "0.34.15")
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+  // Not on Windows: npm installs a `.cmd` shim there (no symlink), and Node is always preferred.
+  it.live.skipIf(windows)(
+    "runs a symlinked letta.js with Bun when the settings file has no login",
+    () =>
+      Effect.gen(function*() {
+        const { bin, bun, home, script } = yield* scriptInstall
+        const host = { home, execPath: process.execPath, runtime: "node" as const }
+        const install = yield* resolveWith({ PATH: bin, HOME: home }, {}, host)
+        assert.strictEqual(install.runtime, "bun")
+        assert.strictEqual(install.command, bun)
+        assert.deepStrictEqual(install.prefixArgs, [script])
+        assert.strictEqual(install.version, "0.34.15")
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer))
+  )
 })
 
 describe("Login.inSettingsFile", () => {

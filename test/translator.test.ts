@@ -1,4 +1,4 @@
-import { NodeServices } from "@effect/platform-node"
+import { NodePath } from "@effect/platform-node"
 import { assert, describe, expect, it } from "@effect/vitest"
 import { Effect, Option, Path } from "effect"
 import * as Translator from "../src/letta/Translator.ts"
@@ -6,7 +6,7 @@ import * as Translator from "../src/letta/Translator.ts"
 const make = Effect.gen(function*() {
   const path = yield* Path.Path
   return Translator.make({ cwd: "/work", path, contextWindow: () => Option.some(100_000) })
-}).pipe(Effect.provide(NodeServices.layer))
+}).pipe(Effect.provide(NodePath.layerPosix))
 
 const events = (items: ReadonlyArray<Translator.TranslatedEvent>) =>
   items.flatMap((item) => (item._tag === "Event" ? [item.event] : []))
