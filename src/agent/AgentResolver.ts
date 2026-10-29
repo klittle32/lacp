@@ -26,9 +26,9 @@ const decodeHostSettings = Schema.decodeUnknownOption(Schema.fromJsonString(Host
 const lastAgent = (settings: HostSettings) => Option.toArray(Option.fromNullishOr(settings.lastAgent))
 
 /** A settings file as a JSON object, to update one key and keep the others. */
-const decodeSettingsObject = Schema.decodeUnknownOption(
-  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
-)
+const SettingsObjectJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown), { space: 2 })
+const decodeSettingsObject = Schema.decodeUnknownOption(SettingsObjectJson)
+const encodeSettingsObject = Schema.encodeEffect(SettingsObjectJson)
 
 export class AgentResolver extends Context.Service<AgentResolver, {
   /** The configured agent, or the host's last-used one for `cwd` that still exists. */
@@ -109,10 +109,9 @@ export class AgentResolver extends Context.Service<AgentResolver, {
           yield* Option.match(settings, {
             onNone: () => Effect.logWarning(`Not recording agent ${agentId} in ${file}: it is not a JSON object`),
             onSome: (settings) =>
-              fs.makeDirectory(dir, { recursive: true }).pipe(
-                Effect.andThen(
-                  fs.writeFileString(file, `${JSON.stringify({ ...settings, lastAgent: agentId }, null, 2)}\n`)
-                )
+              encodeSettingsObject({ ...settings, lastAgent: agentId }).pipe(
+                Effect.tap(() => fs.makeDirectory(dir, { recursive: true })),
+                Effect.flatMap((text) => fs.writeFileString(file, `${text}\n`))
               )
           })
         },

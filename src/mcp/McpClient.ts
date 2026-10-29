@@ -72,8 +72,10 @@ export const connect = Effect.fnUntraced(function*(server: McpServerConfig, opti
   ).pipe(
     Stream.take(MAX_PAGES),
     Stream.runCollect,
-    Effect.map((pages) => pages.flat()),
-    Effect.mapError((error) => failure(`tools/list failed: ${error.message}`))
+    Effect.mapBoth({
+      onSuccess: (pages) => pages.flat(),
+      onFailure: (error) => failure(`tools/list failed: ${error.message}`)
+    })
   )
 
   const refresh = listAll.pipe(

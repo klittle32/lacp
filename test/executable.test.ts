@@ -3,7 +3,7 @@ import { assert, describe, it } from "@effect/vitest"
 import { Effect, FileSystem, Layer, Option, Path, Result } from "effect"
 import { LacpConfig } from "../src/Config.ts"
 import { Host, type HostShape } from "../src/Host.ts"
-import { chooseRuntime, compareVersions, LettaExecutable, parseVersion, spawnable } from "../src/letta/Executable.ts"
+import { chooseRuntime, isAtLeast, LettaExecutable, parseVersion, spawnable } from "../src/letta/Executable.ts"
 import * as Login from "../src/letta/Login.ts"
 
 describe("version helpers", () => {
@@ -13,10 +13,13 @@ describe("version helpers", () => {
     assert.deepStrictEqual(parseVersion("v22.22.0"), Option.none())
   })
 
-  it("compares versions numerically", () => {
-    assert.isTrue(compareVersions("0.34.15", "0.30.0") > 0)
-    assert.isTrue(compareVersions("0.9.0", "0.30.0") < 0)
-    assert.strictEqual(compareVersions("1.2.3", "1.2.3"), 0)
+  it("checks the minimum version by SemVer precedence", () => {
+    assert.isTrue(isAtLeast("0.34.15", "0.30.0"))
+    assert.isTrue(isAtLeast("1.2.3", "1.2.3"))
+    assert.isTrue(isAtLeast("0.35.0-next.2", "0.30.0"))
+    assert.isFalse(isAtLeast("0.9.0", "0.30.0"))
+    assert.isFalse(isAtLeast("0.30.0-beta.1", "0.30.0"))
+    assert.isFalse(isAtLeast("unknown", "0.30.0"))
   })
 })
 

@@ -7,6 +7,7 @@
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
 import { Context, Effect, FileSystem, Layer, Option } from "effect"
+import * as SecureRandom from "effect/crypto/SecureRandom"
 import { SessionIds } from "../src/agent/SessionIds.ts"
 import { Host } from "../src/Host.ts"
 import { initializeHybrid, isInput, projectDir, sent, start, text } from "./helpers/AcpClient.ts"
@@ -142,7 +143,8 @@ describe("SessionIds", () => {
   const ids = (home: string) =>
     Layer.build(SessionIds.layer.pipe(
       Layer.provide(Host.layerTest({ home })),
-      Layer.provide(NodeServices.layer)
+      Layer.provide(NodeServices.layer),
+      Layer.provide(SecureRandom.layerWebCrypto)
     )).pipe(Effect.map((context) => Context.get(context, SessionIds)))
 
   it.live("remembers a session's conversation across processes", () =>

@@ -13,7 +13,7 @@
  * `letta.js`), lacp runs that script with the runtime that can see the user's
  * login: see `LettaRuntime` and `Login.ts`.
  */
-import { Context, Duration, Effect, Exit, FileSystem, Layer, Option, Path, Result } from "effect"
+import { Context, Duration, Effect, Exit, FileSystem, Layer, Option, Path, Result, SemVer } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { LacpConfig, type LettaRuntime } from "../Config.ts"
 import { Host } from "../Host.ts"
@@ -116,16 +116,12 @@ const VERSION_PATTERN = /(\d+\.\d+\.\d+[^\s()]*)\s*\(Letta Code\)/
 export const parseVersion = (output: string): Option.Option<string> =>
   Option.fromNullishOr(VERSION_PATTERN.exec(output)?.[1])
 
-/** Compares the numeric `major.minor.patch` prefix of two versions. */
-export const compareVersions = (a: string, b: string): number => {
-  const parts = (v: string) => v.split(/[.-]/).slice(0, 3).map((n) => Number.parseInt(n, 10) || 0)
-  const [x, y] = [parts(a), parts(b)]
-  for (let i = 0; i < 3; i++) {
-    const d = (x[i] ?? 0) - (y[i] ?? 0)
-    if (d !== 0) return d
-  }
-  return 0
-}
+/** Whether `version` is `minimum` or newer by SemVer precedence; a version that is not SemVer is not. */
+export const isAtLeast = (version: string, minimum: string): boolean =>
+  Result.all([SemVer.parse(version), SemVer.parse(minimum)]).pipe(
+    Result.map(([v, m]) => SemVer.isGreaterThanOrEqualTo(v, m)),
+    Result.getOrElse(() => false)
+  )
 
 export class LettaExecutable extends Context.Service<LettaExecutable, {
   /** Resolves (once) the `letta` installation to drive. */
@@ -326,7 +322,7 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
             reason: "did not report a Letta Code version"
           })
         }
-        if (compareVersions(version.value, MINIMUM_VERSION) < 0) {
+        if (!isAtLeast(version.value, MINIMUM_VERSION)) {
           return Option.some<ProbeResult>({
             _tag: "Rejected",
             path: candidate.path,

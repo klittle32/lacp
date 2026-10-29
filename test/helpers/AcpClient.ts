@@ -5,6 +5,7 @@
  */
 import { NodePath, NodeServices } from "@effect/platform-node"
 import { type Cause, Context, Deferred, Effect, Layer, Option, PubSub, Queue, Ref, Schema } from "effect"
+import * as SecureRandom from "effect/crypto/SecureRandom"
 import { FetchHttpClient } from "effect/http"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -98,7 +99,8 @@ export const startWith = <E>(
       Layer.provide(Host.layerTest(options.host ?? {})),
       // Paths follow the described host (POSIX `/work` by default), whatever platform runs the tests.
       Layer.provide(options.host?.platform === "win32" ? NodePath.layerWin32 : NodePath.layerPosix),
-      Layer.provide(NodeServices.layer)
+      Layer.provide(NodeServices.layer),
+      Layer.provide(SecureRandom.layerWebCrypto)
     )
     const context = yield* Layer.build(layer)
     const server = Context.get(context, AcpServer)

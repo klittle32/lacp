@@ -27,7 +27,7 @@ import {
   Semaphore,
   Stream
 } from "effect"
-import { Crypto } from "effect/Crypto"
+import { SecureRandom } from "effect/crypto/SecureRandom"
 import type { ContentBlock } from "../acp/Content.ts"
 import * as Content from "../acp/Content.ts"
 import { LacpConfig } from "../Config.ts"
@@ -131,7 +131,7 @@ export class Agent extends Context.Service<Agent, {
       const appServer = yield* LettaAppServer
       const settings = yield* Settings
       const client = yield* AcpClient
-      const crypto = yield* Crypto
+      const crypto = yield* SecureRandom
       const sessionIds = yield* SessionIds
       const agents = yield* AgentResolver
       const path = yield* Path.Path
@@ -141,8 +141,7 @@ export class Agent extends Context.Service<Agent, {
       /** What the frame handlers (Frames.ts) need from here. */
       const deps: Deps = { config, client }
 
-      // A failing CSPRNG is not a recoverable condition.
-      const uuid = crypto.randomUUIDv4().pipe(Effect.orDie)
+      const uuid = crypto.uuidV4()
 
       const connection = appServer.connection.pipe(Effect.mapError(unavailable))
 

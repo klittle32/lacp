@@ -5,7 +5,7 @@
  * projects both onto whichever protocol version `initialize` negotiated.
  */
 import { Context, Effect, Layer, Option, Ref } from "effect"
-import { Crypto } from "effect/Crypto"
+import { SecureRandom } from "effect/crypto/SecureRandom"
 import type { Implementation } from "../acp/Content.ts"
 import * as ProjectV1 from "../acp/ProjectV1.ts"
 import * as ProjectV2 from "../acp/ProjectV2.ts"
@@ -49,7 +49,7 @@ export class AcpClient extends Context.Service<AcpClient, {
     Effect.gen(function*() {
       const peer = yield* JsonRpcPeer
       const config = yield* LacpConfig
-      const crypto = yield* Crypto
+      const crypto = yield* SecureRandom
       const selected = yield* Ref.make(Option.none<Selected>())
 
       const decision = (outcome: { readonly outcome: string; readonly optionId?: string }): PermissionDecision =>
@@ -69,7 +69,7 @@ export class AcpClient extends Context.Service<AcpClient, {
               projector: ProjectV2.makeProjector({
                 echoPrompts: config.echoPrompts,
                 notices: presentsNotices(surface.client),
-                noticeIdPrefix: `notice-${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`,
+                noticeIdPrefix: `notice-${yield* crypto.uuidV4()}`,
                 everyModelOptions: showsOptionsForEveryModel(surface.client)
               })
             }

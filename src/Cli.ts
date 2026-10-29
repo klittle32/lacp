@@ -12,6 +12,7 @@
  */
 import { Config, Console, Duration, Effect, Layer, Option, type Redacted, Schema } from "effect"
 import { Command, Flag } from "effect/cli"
+import * as SecureRandom from "effect/crypto/SecureRandom"
 import { FetchHttpClient } from "effect/http"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { AcpServer } from "./agent/AcpServer.ts"
@@ -177,7 +178,8 @@ const ServerLayer = AcpServer.layer.pipe(
   Layer.provide(layerWebSocket),
   Layer.provideMerge(AcpClient.layer),
   Layer.provide(JsonRpcPeer.layer),
-  Layer.provide(Transport.layerStdio)
+  Layer.provide(Transport.layerStdio),
+  Layer.provide(SecureRandom.layerWebCrypto)
 )
 
 /** Configuration for subcommands, from the root command's flags. */

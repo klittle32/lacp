@@ -29,20 +29,20 @@
     "smoke:t3": "node scripts/t3-smoke.ts"
   },
   "dependencies": {
-    "@effect/platform-node": "4.0.5",
-    "effect": "4.0.5"
+    "@effect/platform-node": "4.1.0",
+    "effect": "4.1.0"
   },
   "devDependencies": {
     "@dprint/json": "0.25.2",
-    "@dprint/markdown": "0.26.0",
+    "@dprint/markdown": "0.28.2",
     "@dprint/typescript": "0.96.1",
-    "@effect/tsgo": "0.53.2",
-    "@effect/vitest": "4.0.5",
-    "@types/node": "^26.6.5",
-    "dprint": "0.63.0",
-    "oxlint": "1.88.0",
-    "oxlint-tsgolint": "7.0.2004",
-    "playwright-core": "1.63.0",
+    "@effect/tsgo": "0.63.0",
+    "@effect/vitest": "4.1.0",
+    "@types/node": "26.6.6",
+    "dprint": "0.64.3",
+    "oxlint": "1.90.0",
+    "oxlint-tsgolint": "7.0.2005",
+    "playwright-core": "1.64.1",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
   },

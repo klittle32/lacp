@@ -9,13 +9,15 @@
  * session resumes and lists under its own id, in this process and later ones.
  */
 import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
-import { Crypto } from "effect/Crypto"
+import { SecureRandom } from "effect/crypto/SecureRandom"
 import { Host } from "../Host.ts"
 
 const PREFIX = "lacp-"
 
 const Pair = Schema.Struct({ sessionId: Schema.String, conversationId: Schema.String })
-const decodePair = Schema.decodeUnknownOption(Schema.fromJsonString(Pair))
+const PairJson = Schema.fromJsonString(Pair)
+const decodePair = Schema.decodeUnknownOption(PairJson)
+const encodePair = Schema.encodeEffect(PairJson)
 
 /** Ids that are safe to use as file names (Letta's and lacp's all are). */
 const safe = (id: string) => /^[A-Za-z0-9_-]+$/.test(id)
@@ -38,7 +40,7 @@ export class SessionIds extends Context.Service<SessionIds, {
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
       const host = yield* Host
-      const crypto = yield* Crypto
+      const crypto = yield* SecureRandom
       const directory = path.join(host.home, ".letta", "lacp", "sessions")
       const known = new Map<string, typeof Pair.Type>()
       const fileOf = (kind: "session" | "conversation", id: string) => path.join(directory, `${kind}-${id}.json`)
@@ -55,13 +57,13 @@ export class SessionIds extends Context.Service<SessionIds, {
 
       /** Writes a file whole: a reader never sees half of it. */
       const writeAtomically = Effect.fnUntraced(function*(file: string, text: string) {
-        const temporary = `${file}.${yield* crypto.randomUUIDv4()}.tmp`
+        const temporary = `${file}.${yield* crypto.uuidV4()}.tmp`
         yield* fs.writeFileString(temporary, text)
         yield* fs.rename(temporary, file)
       })
 
       const write = Effect.fnUntraced(function*(sessionId: string, conversationId: string) {
-        const text = JSON.stringify({ sessionId, conversationId })
+        const text = yield* encodePair({ sessionId, conversationId })
         yield* fs.makeDirectory(directory, { recursive: true })
         yield* writeAtomically(fileOf("session", sessionId), text)
         yield* writeAtomically(fileOf("conversation", conversationId), text)
@@ -83,7 +85,7 @@ export class SessionIds extends Context.Service<SessionIds, {
       })
 
       return SessionIds.of({
-        make: crypto.randomUUIDv4().pipe(Effect.orDie, Effect.map((uuid) => `${PREFIX}${uuid}`)),
+        make: crypto.uuidV4().pipe(Effect.map((uuid) => `${PREFIX}${uuid}`)),
         isProvisional: (sessionId) => sessionId.startsWith(PREFIX),
         conversationOf: (sessionId) =>
           read("session", sessionId).pipe(
