@@ -32,7 +32,11 @@ as they are in your terminal.
 
 ## Install
 
-From source (until the package is published):
+```sh
+npm install -g @kylelittle/lacp
+```
+
+Or from source:
 
 ```sh
 git clone https://github.com/klittle32/lacp.git
@@ -251,6 +255,17 @@ T3_SMOKE_BROWSER=/path/to/chromium npm run smoke:t3              # without Googl
 
 In VS Code, install the TypeScript 7 (native preview) extension to get the Effect Language Service in the editor;
 `.vscode/settings.json` already points at the workspace TypeScript.
+
+### Releasing
+
+A GitHub Release publishes to npm (`.github/workflows/release.yml`, through npm trusted publishing, so no token is
+involved). The tag must be `v` followed by the version in `package.json`, which `npm version` guarantees:
+
+```sh
+npm version minor        # or patch / major: bumps package.json, commits, and tags v0.2.0
+git push --follow-tags
+gh release create v0.2.0 --generate-notes   # or write the notes on GitHub
+```
 
 ## License
 

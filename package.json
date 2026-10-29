@@ -18,6 +18,7 @@
     "prepare": "effect-tsgo patch --typescript --oxlint",
     "check": "tsc -p tsconfig.json",
     "build": "node scripts/build.ts",
+    "prepublishOnly": "npm run build",
     "dev": "node src/main.ts",
     "test": "vitest run",
     "test:watch": "vitest",
