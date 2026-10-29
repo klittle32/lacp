@@ -1,7 +1,10 @@
 import { assert, describe, it } from "@effect/vitest"
 import { Effect, Fiber, Option, Ref } from "effect"
+import { AGENT_NAME, AGENT_TITLE, VERSION } from "../src/Version.ts"
 import { initializeHybrid, initializeV1, isInput, setupV1, setupV2, start, text } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
+
+const agentInfo = { name: AGENT_NAME, title: AGENT_TITLE, version: VERSION }
 
 describe("initialize", () => {
   it.live("negotiates v1 with a v1 client", () =>
@@ -9,7 +12,7 @@ describe("initialize", () => {
       const client = yield* start(yield* Fake.make)
       const reply = yield* client.request("initialize", initializeV1)
       assert.strictEqual(reply.result.protocolVersion, 1)
-      assert.deepStrictEqual(reply.result.agentInfo, { name: "lacp", title: "Letta Code", version: "0.1.0" })
+      assert.deepStrictEqual(reply.result.agentInfo, agentInfo)
       assert.strictEqual(reply.result.agentCapabilities.loadSession, true)
       assert.deepStrictEqual(reply.result.agentCapabilities.sessionCapabilities, { list: {}, resume: {}, close: {} })
       assert.deepStrictEqual(reply.result.authMethods, [])
@@ -100,7 +103,7 @@ describe("ACP v1 sessions", () => {
       const start = (yield* Ref.get(fake.commands)).find((c) => c.type === "runtime_start") as any
       assert.strictEqual(start.agent_id, Fake.AGENT_ID)
       assert.strictEqual(start.cwd, "/work")
-      assert.deepStrictEqual(start.client_info, { name: "lacp", title: "Letta Code", version: "0.1.0" })
+      assert.deepStrictEqual(start.client_info, agentInfo)
     }))
 
   it.live("streams a turn and resolves session/prompt with the stop reason", () =>
