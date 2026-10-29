@@ -13,7 +13,7 @@
  * `letta.js`), lacp runs that script with the runtime that can see the user's
  * login: see `LettaRuntime` and `Login.ts`.
  */
-import { Context, Duration, Effect, Exit, FileSystem, Layer, Option, Path, Result, SemVer } from "effect"
+import { Context, Duration, Effect, Exit, FileSystem, Layer, Option, Path, Result, SemVer, String as Str } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { LacpConfig, type LettaRuntime } from "../Config.ts"
 import { Host } from "../Host.ts"
@@ -391,7 +391,7 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
             command: config.lettaPath.value
           })
         }
-        const cliPath = Option.filter(Option.fromUndefinedOr(host.env["LETTA_CLI_PATH"]), (p) => p !== "")
+        const cliPath = Option.filter(Option.fromUndefinedOr(host.env["LETTA_CLI_PATH"]), Str.isNonEmpty)
         const explicit: Array<Candidate> = [
           ...configured,
           ...Option.toArray(cliPath).map((path): Candidate => ({ path, source: "LETTA_CLI_PATH" }))

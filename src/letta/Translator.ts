@@ -10,7 +10,7 @@
  * One translator lives per ACP session. It is synchronous and keeps only the
  * state needed to produce correct upserts, which keeps it easy to test.
  */
-import { Array as Arr, Match, Option, type Path, Schema } from "effect"
+import { Array as Arr, Match, Option, type Path, Schema, String as Str } from "effect"
 import * as Content from "../acp/Content.ts"
 import type { ToolKind } from "../acp/Content.ts"
 import type {
@@ -432,7 +432,7 @@ export const make = (context: TranslatorContext): Translator => {
           _tag: "Notice",
           severity: "error",
           title: d.message,
-          description: d.detail != null && d.detail !== "" ? d.detail : undefined
+          description: Option.getOrUndefined(Option.filter(Option.fromNullishOr(d.detail), Str.isNonEmpty))
         })
       ],
       usage_statistics: (d) => events(usage(d))

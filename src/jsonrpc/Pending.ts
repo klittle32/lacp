@@ -18,13 +18,12 @@ export interface RequestOptions {
 export interface Pending<E> {
   /**
    * Sends a request with `send` and awaits the answer to `key`, which is
-   * registered first so that an answer can never arrive unexpected. Fails
-   * once the connection is closed. `key` is forgotten when the request ends,
-   * however it ends.
+   * registered first so that an answer can never arrive unexpected. Once the
+   * connection is closed, nothing is sent and the request fails with the
+   * close's reason. `key` is forgotten when the request ends, however it
+   * ends. A `key` that is still outstanding is a defect: ids are unique.
    */
   request<E2>(key: string, send: Effect.Effect<void, E2>, options?: RequestOptions): Effect.Effect<unknown, E | E2>
-  /** Whether `key` still awaits its answer. */
-  has(key: string): boolean
   /** Answers `key`; `false` when nothing awaits it. */
   succeed(key: string, value: unknown): Effect.Effect<boolean>
   /** Fails `key`; `false` when nothing awaits it. */
@@ -51,17 +50,22 @@ export const make = <E>(): Effect.Effect<Pending<E>> =>
     const pending: Pending<E> = {
       request: (key, send, options) =>
         Effect.gen(function*() {
+          if (yield* Deferred.isDone(closed)) return yield* Deferred.await(closed)
+          if (waiters.has(key)) return yield* Effect.die(new Error(`A request with id ${key} is still outstanding`))
           const waiter = yield* Deferred.make<unknown, E>()
           waiters.set(key, waiter)
+          /** Whether this request (not a later one with the same key) is still outstanding. */
+          const outstanding = () => waiters.get(key) === waiter
           return yield* send.pipe(
             Effect.andThen(Effect.raceFirst(Deferred.await(waiter), Deferred.await(closed))),
             Effect.onInterrupt(() =>
-              waiters.has(key) && options?.onInterrupt !== undefined ? options.onInterrupt : Effect.void
+              outstanding() && options?.onInterrupt !== undefined ? options.onInterrupt : Effect.void
             ),
-            Effect.ensuring(Effect.sync(() => waiters.delete(key)))
+            Effect.ensuring(Effect.sync(() => {
+              if (outstanding()) waiters.delete(key)
+            }))
           )
         }),
-      has: (key) => waiters.has(key),
       succeed: (key, value) =>
         Effect.suspend(() => {
           const waiter = take(key)
@@ -73,12 +77,14 @@ export const make = <E>(): Effect.Effect<Pending<E>> =>
           return waiter === undefined ? Effect.succeed(false) : Deferred.fail(waiter, error)
         }),
       close: (error) =>
-        Deferred.fail(closed, error).pipe(
-          Effect.andThen(Effect.forEach(Array.from(waiters.values()), (waiter) => Deferred.fail(waiter, error), {
-            discard: true
-          })),
-          Effect.ensuring(Effect.sync(() => waiters.clear()))
-        ),
+        // The outstanding requests are those at the time the close runs, not when it was built.
+        Effect.suspend(() => {
+          const outstanding = Array.from(waiters.values())
+          waiters.clear()
+          return Deferred.fail(closed, error).pipe(
+            Effect.andThen(Effect.forEach(outstanding, (waiter) => Deferred.fail(waiter, error), { discard: true }))
+          )
+        }),
       isClosed: Deferred.isDone(closed),
       closed: Deferred.await(closed)
     }

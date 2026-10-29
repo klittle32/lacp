@@ -25,7 +25,8 @@ import {
   Path,
   Scope,
   Semaphore,
-  Stream
+  Stream,
+  String as Str
 } from "effect"
 import { SecureRandom } from "effect/crypto/SecureRandom"
 import type { ContentBlock } from "../acp/Content.ts"
@@ -474,14 +475,16 @@ export class Agent extends Context.Service<Agent, {
           return yield* publish(yield* openPending(input))
         }
         const { conversation, session } = yield* openSession({ ...input, conversationId: conversationId.value })
-        const title = conversation.summary ?? conversation.description
-        if (title !== undefined && title !== null && title !== "") {
+        const title = Option.filter(
+          Option.fromNullishOr(conversation.summary ?? conversation.description),
+          Str.isNonEmpty
+        )
+        const updatedAt = Option.filter(Option.fromNullishOr(conversation.last_message_at), Str.isNonEmpty)
+        if (Option.isSome(title)) {
           yield* emit(session, {
             _tag: "SessionInfo",
-            title,
-            ...(conversation.last_message_at != null && conversation.last_message_at !== ""
-              ? { updatedAt: conversation.last_message_at }
-              : {})
+            title: title.value,
+            ...(Option.isSome(updatedAt) ? { updatedAt: updatedAt.value } : {})
           })
         }
         return yield* publish(session)

@@ -225,8 +225,11 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
 
       /** Opens one connection inside the current scope. */
       const connect = Effect.fnUntraced(function*(generation: number) {
-        /** Calls awaiting their responses; closed, with the reason, once the connection is lost. */
+        /** Calls awaiting their responses; closed, with the reason, once the connection is lost or given up. */
         const pending = yield* Pending.make<LettaDisconnected>()
+        yield* Effect.addFinalizer(() =>
+          pending.close(new LettaDisconnected({ message: "The Letta Code App Server connection was closed" }))
+        )
         const url = yield* Option.match(config.appServerUrl, {
           onSome: Effect.succeed,
           onNone: () => executable.resolve.pipe(Effect.flatMap((install) => spawnServer(install, pending)))
