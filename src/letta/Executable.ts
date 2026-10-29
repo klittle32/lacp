@@ -391,9 +391,10 @@ export class LettaExecutable extends Context.Service<LettaExecutable, {
             command: config.lettaPath.value
           })
         }
+        const cliPath = Option.filter(Option.fromUndefinedOr(host.env["LETTA_CLI_PATH"]), (p) => p !== "")
         const explicit: Array<Candidate> = [
           ...configured,
-          ...(host.env["LETTA_CLI_PATH"] ? [{ path: host.env["LETTA_CLI_PATH"], source: "LETTA_CLI_PATH" }] : [])
+          ...Option.toArray(cliPath).map((path): Candidate => ({ path, source: "LETTA_CLI_PATH" }))
         ]
         if (explicit.length > 0) {
           const found = yield* tryAll(explicit)

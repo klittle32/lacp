@@ -44,7 +44,20 @@
           "effect/testing",
           "effect/Logger#toFile"
         ],
-        "diagnosticSeverity": {}
+        "diagnosticSeverity": {
+          "catchUnfailableEffect": "warning",
+          "preferSchemaOverJson": "warning",
+          "schemaSync": "warning",
+          "strictBooleanExpressions": "warning"
+        },
+        "overrides": [
+          {
+            "include": ["test/**/*.ts", "scripts/**/*.ts"],
+            "options": {
+              "diagnosticSeverity": { "preferSchemaOverJson": "off", "schemaSync": "off" }
+            }
+          }
+        ]
       }
     ]
   }

@@ -65,7 +65,7 @@ export const lettaToolName = (server: string, tool: string) => {
 }
 
 const decodeContent = Schema.decodeUnknownOption(Mcp.Content)
-const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
+const encodeJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))
 
 type LettaPart = ExternalToolResult["content"][number]
 
@@ -79,19 +79,20 @@ const part: (content: Mcp.Content) => LettaPart = Match.type<Mcp.Content>().pipe
   })
 )
 
-/** Converts an MCP tool result into Letta's external tool result. */
-export const toLettaResult = (result: Mcp.CallToolResult): ExternalToolResult => {
-  const content = result.content.map((item) =>
+/** Converts an MCP tool result into Letta's external tool result; content of unknown kinds goes as JSON. */
+export const toLettaResult = Effect.fnUntraced(function*(result: Mcp.CallToolResult) {
+  const json = (value: unknown) => encodeJson(value).pipe(Effect.map((text): LettaPart => ({ type: "text", text })))
+  const content = yield* Effect.forEach(result.content, (item) =>
     Option.match(decodeContent(item), {
-      onNone: (): LettaPart => ({ type: "text", text: encodeJson(item) }),
-      onSome: part
-    })
-  )
-  if (content.length === 0 && result.structuredContent !== undefined) {
-    content.push({ type: "text", text: encodeJson(result.structuredContent) })
-  }
-  return { content, ...(result.isError === true ? { is_error: true } : {}) }
-}
+      onNone: () => json(item),
+      onSome: (known) => Effect.succeed(part(known))
+    }))
+  const shown = content.length === 0 && result.structuredContent !== undefined
+    ? [yield* json(result.structuredContent)]
+    : content
+  const letta: ExternalToolResult = { content: shown, ...(result.isError === true ? { is_error: true } : {}) }
+  return letta
+})
 
 interface Entry {
   readonly connection: McpConnection
@@ -179,14 +180,16 @@ export const connectAll = Effect.fnUntraced(function*(
       Effect.suspend(() => {
         const entry = entries.get(name)
         if (entry === undefined) return empty.call(name, input)
+        const failed = (text: string): ExternalToolResult => ({ content: [{ type: "text", text }], is_error: true })
         return entry.connection.callTool(entry.tool.name, input, TOOL_TIMEOUT_MS - 5_000).pipe(
-          Effect.map(toLettaResult),
-          Effect.catch((error) =>
-            Effect.succeed<ExternalToolResult>({
-              content: [{ type: "text", text: `MCP error from ${error.server}: ${error.message}` }],
-              is_error: true
-            })
-          )
+          Effect.flatMap(toLettaResult),
+          Effect.catchTags({
+            McpError: (error) => Effect.succeed(failed(`MCP error from ${error.server}: ${error.message}`)),
+            SchemaError: (error) =>
+              Effect.succeed(
+                failed(`The result from ${entry.connection.server.name} could not be encoded: ${error.message}`)
+              )
+          })
         )
       }),
     changes: Stream.fromPubSub(changes),

@@ -58,31 +58,32 @@ describe("Bridge", () => {
     assert.notStrictEqual(long, Bridge.lettaToolName("a".repeat(40), "c".repeat(40)))
   })
 
-  it("converts MCP results to Letta results", () => {
-    assert.deepStrictEqual(
-      Bridge.toLettaResult({
-        content: [
-          { type: "text", text: "a" },
-          { type: "image", data: "AAAA", mimeType: "image/png" },
-          { type: "resource", resource: { uri: "file:///x", text: "body" } },
-          { type: "resource_link", uri: "file:///y", name: "y" }
-        ],
-        isError: true
-      }),
-      {
-        content: [
-          { type: "text", text: "a" },
-          { type: "image", data: "AAAA", mimeType: "image/png" },
-          { type: "text", text: "body" },
-          { type: "text", text: "y: file:///y" }
-        ],
-        is_error: true
-      }
-    )
-    assert.deepStrictEqual(Bridge.toLettaResult({ content: [], structuredContent: { sum: 3 } }), {
-      content: [{ type: "text", text: "{\"sum\":3}" }]
-    })
-  })
+  it.effect("converts MCP results to Letta results", () =>
+    Effect.gen(function*() {
+      assert.deepStrictEqual(
+        yield* Bridge.toLettaResult({
+          content: [
+            { type: "text", text: "a" },
+            { type: "image", data: "AAAA", mimeType: "image/png" },
+            { type: "resource", resource: { uri: "file:///x", text: "body" } },
+            { type: "resource_link", uri: "file:///y", name: "y" }
+          ],
+          isError: true
+        }),
+        {
+          content: [
+            { type: "text", text: "a" },
+            { type: "image", data: "AAAA", mimeType: "image/png" },
+            { type: "text", text: "body" },
+            { type: "text", text: "y: file:///y" }
+          ],
+          is_error: true
+        }
+      )
+      assert.deepStrictEqual(yield* Bridge.toLettaResult({ content: [], structuredContent: { sum: 3 } }), {
+        content: [{ type: "text", text: "{\"sum\":3}" }]
+      })
+    }))
 
   it.live("bridges reachable servers and reports the others", () =>
     Effect.gen(function*() {

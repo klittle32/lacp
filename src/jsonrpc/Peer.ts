@@ -44,6 +44,7 @@ import {
   RpcError
 } from "./JsonRpc.ts"
 import { type Dispatcher, notification, type NotificationMethod, type RequestMethod } from "./Method.ts"
+import * as Pending from "./Pending.ts"
 import { Transport } from "./Transport.ts"
 
 const CancelParams = Schema.Struct({ requestId: RequestIdSchema, reason: Schema.optionalKey(Schema.String) })
@@ -86,12 +87,10 @@ export const makePeer = Effect.fnUntraced(function*(
   const label = options.label ?? "acp"
   const transport = yield* Transport
   const fibers = yield* FiberSet.make()
-  /** Our outgoing requests awaiting a response. */
-  const pending = new Map<string, Deferred.Deferred<unknown, RpcError>>()
+  /** Our outgoing requests awaiting a response; closed once the connection is gone, so later ones fail at once. */
+  const pending = yield* Pending.make<RpcError>()
   /** Incoming requests in flight, with the signal that cancels them. */
   const inflight = new Map<string, Deferred.Deferred<void>>()
-  /** Fails once the connection is gone, so that later requests fail at once instead of timing out. */
-  const closed = yield* Deferred.make<never, RpcError>()
   let nextId = 0
 
   const encodeLine = Schema.encodeEffect(OutgoingJson)
@@ -164,16 +163,14 @@ export const makePeer = Effect.fnUntraced(function*(
 
   const handleResponse = (message: ResponseMessage): Effect.Effect<void> => {
     const key = idKey(message.id)
-    const deferred = pending.get(key)
-    if (deferred === undefined) {
-      return Effect.logWarning("Received a response for an unknown request id", message.id)
-    }
-    pending.delete(key)
-    return isSuccess(message)
-      ? Deferred.succeed(deferred, message.result).pipe(Effect.asVoid)
-      : Deferred.fail(deferred, RpcError.of(message.error.code, message.error.message, message.error.data)).pipe(
-        Effect.asVoid
+    const answer = isSuccess(message)
+      ? pending.succeed(key, message.result)
+      : pending.fail(key, RpcError.of(message.error.code, message.error.message, message.error.data))
+    return answer.pipe(
+      Effect.flatMap((answered) =>
+        answered ? Effect.void : Effect.logWarning("Received a response for an unknown request id", message.id)
       )
+    )
   }
 
   /**
@@ -227,18 +224,7 @@ export const makePeer = Effect.fnUntraced(function*(
       })
     )
 
-  const closePending = Deferred.fail(closed, RpcError.internal("Connection closed")).pipe(
-    Effect.andThen(
-      Effect.forEach(
-        Array.from(pending.values()),
-        (deferred) => Deferred.fail(deferred, RpcError.internal("Connection closed")),
-        {
-          discard: true
-        }
-      )
-    ),
-    Effect.ensuring(Effect.sync(() => pending.clear()))
-  )
+  const closePending = pending.close(RpcError.internal("Connection closed"))
 
   yield* Effect.addFinalizer(() => closePending)
 
@@ -260,20 +246,16 @@ export const makePeer = Effect.fnUntraced(function*(
         )
       )
       const id = nextId++
-      const key = idKey(id)
-      const deferred = yield* Deferred.make<unknown, RpcError>()
-      pending.set(key, deferred)
-      const raw = yield* write({ jsonrpc: "2.0", id, method: method.name, params: encoded }).pipe(
-        Effect.andThen(Effect.raceFirst(Deferred.await(deferred), Deferred.await(closed))),
+      // A timeout interrupts the wait, which tells the other side to stop, as an interrupted caller does.
+      const raw = yield* pending.request(
+        idKey(id),
+        write({ jsonrpc: "2.0", id, method: method.name, params: encoded }),
+        { onInterrupt: sendCancel(id) }
+      ).pipe(
         Effect.timeoutOrElse({
           duration: requestOptions?.timeout ?? Duration.infinity,
-          orElse: () =>
-            sendCancel(id).pipe(
-              Effect.andThen(Effect.fail(RpcError.internal(`Request timed out: ${method.name}`)))
-            )
-        }),
-        Effect.onInterrupt(() => pending.has(key) ? sendCancel(id) : Effect.void),
-        Effect.ensuring(Effect.sync(() => pending.delete(key)))
+          orElse: () => Effect.fail(RpcError.internal(`Request timed out: ${method.name}`))
+        })
       )
       return yield* Schema.decodeUnknownEffect(method.result)(raw).pipe(
         Effect.mapError((error) => RpcError.internal(`Invalid result for ${method.name}`, { reason: error.message }))

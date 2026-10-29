@@ -479,7 +479,9 @@ export class Agent extends Context.Service<Agent, {
           yield* emit(session, {
             _tag: "SessionInfo",
             title,
-            ...(conversation.last_message_at ? { updatedAt: conversation.last_message_at } : {})
+            ...(conversation.last_message_at != null && conversation.last_message_at !== ""
+              ? { updatedAt: conversation.last_message_at }
+              : {})
           })
         }
         return yield* publish(session)

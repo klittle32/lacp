@@ -428,7 +428,12 @@ export const make = (context: TranslatorContext): Translator => {
         clientMessageIds: d.client_message_ids ?? []
       }],
       error_message: (d) => [
-        event({ _tag: "Notice", severity: "error", title: d.message, description: d.detail ? d.detail : undefined })
+        event({
+          _tag: "Notice",
+          severity: "error",
+          title: d.message,
+          description: d.detail != null && d.detail !== "" ? d.detail : undefined
+        })
       ],
       usage_statistics: (d) => events(usage(d))
     })

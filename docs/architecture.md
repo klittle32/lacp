@@ -14,6 +14,7 @@ src/
 ├── jsonrpc/              transport-agnostic JSON-RPC 2.0
 │   ├── JsonRpc.ts        wire schemas, error codes, RpcError
 │   ├── Method.ts         typed method descriptors, handlers, dispatchers
+│   ├── Pending.ts        outstanding requests by id (shared with the Letta connection): answered by the reader, all failed on close
 │   ├── Transport.ts      NDJSON over stdio (single writer fiber) / in-memory queues for tests
 │   └── Peer.ts           bidirectional peer: requests both ways, batches, cancellation (ACP or MCP style)
 ├── acp/                  the ACP wire formats

@@ -26,6 +26,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import * as Socket from "effect/socket/Socket"
 import { type AuthMode, LacpConfig } from "../Config.ts"
 import { Host } from "../Host.ts"
+import * as Pending from "../jsonrpc/Pending.ts"
 import { LettaDisconnected, type LettaError, LettaRequestFailed, LettaStartFailed } from "./Errors.ts"
 import { LettaExecutable, type LettaInstall, spawnable } from "./Executable.ts"
 import * as Login from "./Login.ts"
@@ -143,7 +144,7 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
 
       /** Spawns `letta server --listen` and waits for its WebSocket URL. */
       const spawnServer = Effect.fnUntraced(
-        function*(install: LettaInstall, exited: Deferred.Deferred<never, LettaDisconnected>) {
+        function*(install: LettaInstall, pending: Pending.Pending<LettaDisconnected>) {
           const launch = spawnable(install, [...BACKEND_ARGS[config.auth], "server", "--listen", "ws://127.0.0.1:0"])
           yield* Effect.logInfo(`Starting Letta Code App Server: ${[launch.command, ...launch.args].join(" ")}`)
           const keyNote = Login.environmentKeyNote(config.auth, host.env)
@@ -196,10 +197,7 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
           )
           yield* handle.exitCode.pipe(
             Effect.flatMap((code) =>
-              Deferred.fail(
-                exited,
-                new LettaDisconnected({ message: `The Letta Code App Server exited with code ${code}` })
-              )
+              pending.close(new LettaDisconnected({ message: `The Letta Code App Server exited with code ${code}` }))
             ),
             Effect.ignore,
             Effect.forkScoped
@@ -207,7 +205,7 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
 
           return yield* Deferred.await(url).pipe(
             Effect.raceFirst(
-              Deferred.await(exited).pipe(
+              pending.closed.pipe(
                 Effect.mapError((error) => new LettaStartFailed({ message: error.message, output: tail.join("\n") }))
               )
             ),
@@ -227,10 +225,11 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
 
       /** Opens one connection inside the current scope. */
       const connect = Effect.fnUntraced(function*(generation: number) {
-        const closed = yield* Deferred.make<never, LettaDisconnected>()
+        /** Calls awaiting their responses; closed, with the reason, once the connection is lost. */
+        const pending = yield* Pending.make<LettaDisconnected>()
         const url = yield* Option.match(config.appServerUrl, {
           onSome: Effect.succeed,
-          onNone: () => executable.resolve.pipe(Effect.flatMap((install) => spawnServer(install, closed)))
+          onNone: () => executable.resolve.pipe(Effect.flatMap((install) => spawnServer(install, pending)))
         })
         yield* Effect.logDebug(`Connecting to Letta Code App Server at ${url}`)
 
@@ -246,7 +245,6 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
         )
         const writer = yield* socket.writer
         const frames = yield* PubSub.unbounded<Frame>()
-        const pending = new Map<string, Deferred.Deferred<unknown, LettaDisconnected>>()
         let nextId = 0
 
         const route = (text: string) =>
@@ -256,40 +254,28 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
               Option.match(decodeHeader(raw), {
                 onNone: () => Effect.logDebug("Ignoring a Letta frame without a type"),
                 onSome: (header) => {
-                  const waiter = header.request_id === undefined || header.type === "control_request"
-                    ? undefined
-                    : pending.get(header.request_id)
-                  if (waiter !== undefined && header.request_id !== undefined) {
-                    pending.delete(header.request_id)
-                    return Deferred.succeed(waiter, raw).pipe(Effect.asVoid)
-                  }
-                  return PubSub.publish(frames, { header, raw }).pipe(Effect.asVoid)
+                  const publish = PubSub.publish(frames, { header, raw }).pipe(Effect.asVoid)
+                  // The id of a control request is its own (an approval response answers it), not a call's.
+                  if (header.request_id === undefined || header.type === "control_request") return publish
+                  return pending.succeed(header.request_id, raw).pipe(
+                    Effect.flatMap((answered) => answered ? Effect.void : publish)
+                  )
                 }
               })
             ),
-            Effect.catch(() => Effect.logWarning("Ignoring a malformed Letta frame"))
+            Effect.catch((error) => Effect.logWarning("Ignoring a malformed Letta frame", error))
           )
 
         yield* pull.pipe(
           Effect.flatMap((batch) => Effect.forEach(batch, route, { discard: true })),
           Effect.forever,
           Effect.catch((error) =>
-            Deferred.fail(
-              closed,
+            pending.close(
               new LettaDisconnected({ message: `Lost the Letta Code App Server connection: ${error.message}` })
             )
           ),
           Effect.forkScoped
         )
-
-        const failPending = Deferred.await(closed).pipe(
-          Effect.catch((error) =>
-            Effect.forEach(Array.from(pending.values()), (d) => Deferred.fail(d, error), { discard: true }).pipe(
-              Effect.ensuring(Effect.sync(() => pending.clear()))
-            )
-          )
-        )
-        yield* Effect.forkScoped(failPending)
 
         const send = (command: Command) =>
           encodeCommand(command).pipe(
@@ -305,18 +291,14 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
         ): Effect.fn.Return<A, LettaRequestFailed | LettaDisconnected> {
           const requestId = `lacp-${generation}-${nextId++}`
           const command = make(requestId)
-          const waiter = yield* Deferred.make<unknown, LettaDisconnected>()
-          pending.set(requestId, waiter)
-          const raw = yield* send(command).pipe(
-            Effect.andThen(Deferred.await(waiter)),
+          const raw = yield* pending.request(requestId, send(command)).pipe(
             Effect.timeoutOrElse({
               duration: options?.timeout ?? DEFAULT_CALL_TIMEOUT,
               orElse: () =>
                 Effect.fail(
                   new LettaRequestFailed({ command: command.type, message: "Letta did not respond in time" })
                 )
-            }),
-            Effect.ensuring(Effect.sync(() => pending.delete(requestId)))
+            })
           )
           const decoded = yield* Schema.decodeUnknownEffect(response)(raw).pipe(
             Effect.mapError((error) =>
@@ -356,8 +338,8 @@ export class LettaAppServer extends Context.Service<LettaAppServer, {
           call,
           send,
           subscribe: PubSub.subscribe(frames),
-          isAlive: Deferred.isDone(closed).pipe(Effect.map((done) => !done)),
-          closed: Deferred.await(closed)
+          isAlive: pending.isClosed.pipe(Effect.map((closed) => !closed)),
+          closed: pending.closed
         } satisfies LettaConnection
       })
 
