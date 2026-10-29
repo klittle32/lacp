@@ -2,7 +2,14 @@
   "name": "@kylelittle/lacp",
   "version": "0.1.0",
   "description": "An Agent Client Protocol (ACP) server for Letta Code, written in Effect",
-  "keywords": ["acp", "agent-client-protocol", "letta", "letta-code", "effect", "zed"],
+  "keywords": [
+    "acp",
+    "agent-client-protocol",
+    "letta",
+    "letta-code",
+    "effect",
+    "zed"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/klittle32/lacp.git"
@@ -11,9 +18,13 @@
   "author": "Kyle Little <klittle32@gmail.com>",
   "type": "module",
   "bin": {
-    "lacp": "./dist/main.js"
+    "lacp": "dist/main.js"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "prepare": "effect-tsgo patch --typescript --oxlint",
     "check": "tsc -p tsconfig.json",
