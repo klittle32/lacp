@@ -81,6 +81,40 @@ describe("Pending", () => {
       assert.strictEqual(yield* Fiber.join(first), "answer")
     }))
 
+  it.effect("an answer that arrived before the close stands", () =>
+    Effect.gen(function*() {
+      const pending = yield* Pending.make<string>()
+      const fiber = yield* Effect.forkChild(pending.request("1", Effect.void))
+      yield* Effect.yieldNow
+      // The answer and the close land before the request's fiber runs again.
+      assert.isTrue(yield* pending.succeed("1", "answer"))
+      yield* pending.close("gone")
+      assert.strictEqual(yield* Fiber.join(fiber), "answer")
+    }))
+
+  it.effect("a close cannot slip in between a request's check and its registration", () =>
+    Effect.gen(function*() {
+      const pending = yield* Pending.make<string>()
+      const close = yield* Effect.forkChild(pending.close("gone"))
+      const request = yield* Effect.forkChild(pending.request("1", Effect.yieldNow))
+      const exit = yield* Fiber.await(request)
+      yield* Fiber.join(close)
+      // Either the request saw the close, or the close saw the request: never a request nobody will answer.
+      assert.deepStrictEqual(exit, Exit.fail("gone"))
+    }))
+
+  it.effect("concurrent requests with one key cannot both register", () =>
+    Effect.gen(function*() {
+      const pending = yield* Pending.make<string>()
+      const first = yield* Effect.forkChild(pending.request("1", Effect.yieldNow))
+      const second = yield* Effect.forkChild(pending.request("1", Effect.yieldNow))
+      const rejected = yield* Fiber.await(second)
+      assert.isTrue(Exit.isFailure(rejected) && Cause.hasDies(rejected.cause))
+      // The first request registered and is the one the answer reaches.
+      assert.isTrue(yield* pending.succeed("1", "answer"))
+      assert.strictEqual(yield* Fiber.join(first), "answer")
+    }))
+
   it.effect("runs the interrupt hook only while the request is outstanding", () =>
     Effect.gen(function*() {
       const pending = yield* Pending.make<string>()

@@ -35,10 +35,18 @@ export interface Pending<E> {
   readonly closed: Effect.Effect<never, E>
 }
 
+/**
+ * Every transition below is one synchronous step, so no other fiber can run
+ * between a check and the change it guards: a close cannot slip in between a
+ * request's check for it and its registration, two requests cannot both
+ * register one key, and a close that fails the outstanding requests cannot be
+ * interrupted after forgetting them. A close reaches a request through the
+ * request's own waiter, so an answer that arrived first is never overridden.
+ */
 export const make = <E>(): Effect.Effect<Pending<E>> =>
-  Effect.gen(function*() {
+  Effect.sync(() => {
     const waiters = new Map<string, Deferred.Deferred<unknown, E>>()
-    const closed = yield* Deferred.make<never, E>()
+    const closed = Deferred.makeUnsafe<never, E>()
 
     /** Removes and returns the waiter for `key`. */
     const take = (key: string) => {
@@ -47,45 +55,44 @@ export const make = <E>(): Effect.Effect<Pending<E>> =>
       return waiter
     }
 
+    const answer = (key: string, result: Effect.Effect<unknown, E>) =>
+      Effect.sync(() => {
+        const waiter = take(key)
+        return waiter !== undefined && Deferred.doneUnsafe(waiter, result)
+      })
+
     const pending: Pending<E> = {
       request: (key, send, options) =>
-        Effect.gen(function*() {
-          if (yield* Deferred.isDone(closed)) return yield* Deferred.await(closed)
-          if (waiters.has(key)) return yield* Effect.die(new Error(`A request with id ${key} is still outstanding`))
-          const waiter = yield* Deferred.make<unknown, E>()
-          waiters.set(key, waiter)
-          /** Whether this request (not a later one with the same key) is still outstanding. */
-          const outstanding = () => waiters.get(key) === waiter
-          return yield* send.pipe(
-            Effect.andThen(Effect.raceFirst(Deferred.await(waiter), Deferred.await(closed))),
-            Effect.onInterrupt(() =>
-              outstanding() && options?.onInterrupt !== undefined ? options.onInterrupt : Effect.void
-            ),
-            Effect.ensuring(Effect.sync(() => {
-              if (outstanding()) waiters.delete(key)
-            }))
-          )
-        }),
-      succeed: (key, value) =>
-        Effect.suspend(() => {
-          const waiter = take(key)
-          return waiter === undefined ? Effect.succeed(false) : Deferred.succeed(waiter, value)
-        }),
-      fail: (key, error) =>
-        Effect.suspend(() => {
-          const waiter = take(key)
-          return waiter === undefined ? Effect.succeed(false) : Deferred.fail(waiter, error)
-        }),
+        // Registering and releasing the key cannot be interrupted; only sending and waiting can.
+        Effect.uninterruptibleMask((restore) =>
+          Effect.suspend(() => {
+            if (Deferred.isDoneUnsafe(closed)) return Deferred.await(closed)
+            if (waiters.has(key)) return Effect.die(new Error(`A request with id ${key} is still outstanding`))
+            const waiter = Deferred.makeUnsafe<unknown, E>()
+            waiters.set(key, waiter)
+            /** Whether this request (not a later one with the same key) is still outstanding. */
+            const outstanding = () => waiters.get(key) === waiter
+            return restore(send.pipe(Effect.andThen(Deferred.await(waiter)))).pipe(
+              Effect.onInterrupt(() =>
+                outstanding() && options?.onInterrupt !== undefined ? options.onInterrupt : Effect.void
+              ),
+              Effect.ensuring(Effect.sync(() => {
+                if (outstanding()) waiters.delete(key)
+              }))
+            )
+          })
+        ),
+      succeed: (key, value) => answer(key, Effect.succeed(value)),
+      fail: (key, error) => answer(key, Effect.fail(error)),
       close: (error) =>
         // The outstanding requests are those at the time the close runs, not when it was built.
-        Effect.suspend(() => {
+        Effect.sync(() => {
+          Deferred.doneUnsafe(closed, Effect.fail(error))
           const outstanding = Array.from(waiters.values())
           waiters.clear()
-          return Deferred.fail(closed, error).pipe(
-            Effect.andThen(Effect.forEach(outstanding, (waiter) => Deferred.fail(waiter, error), { discard: true }))
-          )
+          for (const waiter of outstanding) Deferred.doneUnsafe(waiter, Effect.fail(error))
         }),
-      isClosed: Deferred.isDone(closed),
+      isClosed: Effect.sync(() => Deferred.isDoneUnsafe(closed)),
       closed: Deferred.await(closed)
     }
     return pending
