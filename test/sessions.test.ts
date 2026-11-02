@@ -139,6 +139,141 @@ describe("lazy conversations", () => {
     }))
 })
 
+describe("concurrent session requests", () => {
+  /** A conversation lookup slow enough for concurrent requests to overlap. */
+  const slowRetrieve = (fake: Fake.FakeLetta) =>
+    fake.on("conversation_retrieve", (command: any) =>
+      Effect.sleep("30 millis").pipe(Effect.as({
+        success: true,
+        conversation: { id: command.conversation_id, agent_id: Fake.AGENT_ID }
+      })))
+
+  const chunks = (client: { readonly updates: Effect.Effect<ReadonlyArray<any>> }) =>
+    client.updates.pipe(Effect.map((all) => all.filter((u) => u.sessionUpdate === "agent_message_chunk")))
+
+  const say = (fake: Fake.FakeLetta, conversation: string) =>
+    fake.emit(Fake.delta(conversation, {
+      message_type: "assistant_message",
+      id: "m1",
+      otid: "m1",
+      run_id: "r1",
+      seq_id: 1,
+      content: [{ type: "text", text: "hi" }]
+    }))
+
+  it.live("gives several prompts' sessions in one directory one new agent", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* fake.on("create_agent", () =>
+        Effect.sleep("20 millis").pipe(Effect.as({ success: true, agent_id: Fake.AGENT_ID })))
+      const cwd = projectDir()
+      const client = yield* start(fake, { agentId: Option.none() })
+      yield* client.request("initialize", initializeHybrid)
+      const first = (yield* client.request("session/new", { cwd })).result.sessionId as string
+      const second = (yield* client.request("session/new", { cwd })).result.sessionId as string
+      yield* Effect.forEach(
+        [first, second],
+        (sessionId) =>
+          client.request("session/prompt", { sessionId, prompt: text("hello") }),
+        { concurrency: "unbounded" }
+      )
+      assert.strictEqual((yield* sent(fake, "create_agent")).length, 1)
+    }))
+
+  it.live("opens a session resumed twice at once only once", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* slowRetrieve(fake)
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const resumes = yield* Effect.forEach(
+        [1, 2],
+        () => client.request("session/resume", { sessionId: "conv-old", cwd: "/work" }),
+        { concurrency: "unbounded" }
+      )
+      assert.isTrue(resumes.every((r) => r.result !== undefined))
+      assert.strictEqual((yield* sent(fake, "runtime_start")).length, 1)
+
+      // Only one runtime follows the conversation, so its output reaches the client once.
+      yield* say(fake, "conv-old")
+      yield* client.update((u) => u.sessionUpdate === "agent_message_chunk")
+      yield* Effect.sleep("30 millis")
+      assert.strictEqual((yield* chunks(client)).length, 1)
+    }))
+
+  it.live("opens a session that has no conversation yet, resumed twice at once, only once", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const sessionId = (yield* client.request("session/new", { cwd: "/work" })).result.sessionId as string
+      yield* client.request("session/close", { sessionId })
+      const before = (yield* sent(fake, "agent_retrieve")).length
+      yield* Effect.forEach(
+        [1, 2],
+        () => client.request("session/resume", { sessionId, cwd: "/work" }),
+        { concurrency: "unbounded" }
+      )
+      assert.strictEqual((yield* sent(fake, "agent_retrieve")).length - before, 1)
+    }))
+
+  it.live("leaves one live runtime when a session is resumed from two directories at once", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* slowRetrieve(fake)
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      yield* Effect.forEach(
+        ["/work", "/elsewhere"],
+        (cwd) => client.request("session/resume", { sessionId: "conv-old", cwd }),
+        { concurrency: "unbounded" }
+      )
+      yield* say(fake, "conv-old")
+      yield* client.update((u) => u.sessionUpdate === "agent_message_chunk")
+      yield* Effect.sleep("30 millis")
+      assert.strictEqual((yield* chunks(client)).length, 1)
+    }))
+
+  it.live("lets a session open after a cancelled attempt to open it", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* fake.on("conversation_retrieve", () => Effect.never)
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      yield* client.raw(JSON.stringify({
+        jsonrpc: "2.0",
+        id: "stuck",
+        method: "session/resume",
+        params: { sessionId: "conv-old", cwd: "/work" }
+      }))
+      yield* fake.waitFor((c) => c.type === "conversation_retrieve")
+      yield* client.notify("$/cancel_request", { requestId: "stuck" })
+      yield* client.next((m) => m.id === "stuck")
+
+      yield* slowRetrieve(fake)
+      const resumed = yield* client.request("session/resume", { sessionId: "conv-old", cwd: "/work" })
+      assert.isDefined(resumed.result)
+    }))
+
+  it.live("closes a session whose close arrives while it is still opening", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* slowRetrieve(fake)
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      yield* Effect.all([
+        client.request("session/resume", { sessionId: "conv-old", cwd: "/work" }),
+        Effect.sleep("5 millis").pipe(
+          Effect.andThen(client.request("session/close", { sessionId: "conv-old" }))
+        )
+      ], { concurrency: "unbounded" })
+      assert.strictEqual(
+        (yield* client.request("session/prompt", { sessionId: "conv-old", prompt: text("x") })).error?.code,
+        -32002
+      )
+    }))
+})
+
 describe("SessionIds", () => {
   const ids = (home: string) =>
     Layer.build(SessionIds.layer.pipe(

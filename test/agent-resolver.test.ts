@@ -64,6 +64,58 @@ describe("AgentResolver", () => {
       assert.strictEqual(yield* created(fake), 1)
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
 
+  it.live("creates one agent for a directory however many callers ask at once", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const ids = yield* Ref.make(0)
+      yield* fake.on("create_agent", () =>
+        Ref.updateAndGet(ids, (n) => n + 1).pipe(
+          Effect.delay("20 millis"),
+          Effect.map((n) => ({ success: true, agent_id: `agent-${n}` }))
+        ))
+      const { resolver, cwd } = yield* setup()
+      const agents = yield* Effect.all(
+        [resolver.findOrCreate(fake.connection, cwd), resolver.findOrCreate(fake.connection, cwd)],
+        { concurrency: "unbounded" }
+      )
+      assert.deepStrictEqual(agents, ["agent-1", "agent-1"])
+      assert.strictEqual(yield* created(fake), 1)
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
+  it.live("still creates one agent per directory when different directories ask at once", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const { resolver, cwd } = yield* setup()
+      const fs = yield* FileSystem.FileSystem
+      const other = yield* fs.makeTempDirectoryScoped()
+      yield* Effect.all(
+        [resolver.findOrCreate(fake.connection, cwd), resolver.findOrCreate(fake.connection, other)],
+        { concurrency: "unbounded" }
+      )
+      assert.strictEqual(yield* created(fake), 2)
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
+  it.live("lets a waiting caller try again when the agent it waited for could not be created", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const attempts = yield* Ref.make(0)
+      yield* fake.on("create_agent", () =>
+        Ref.updateAndGet(attempts, (n) => n + 1).pipe(
+          Effect.delay("20 millis"),
+          Effect.map((n) =>
+            n === 1 ? { success: false, error: "no capacity" } : { success: true, agent_id: Fake.AGENT_ID }
+          )
+        ))
+      const { resolver, cwd } = yield* setup()
+      const results = yield* Effect.forEach(
+        [1, 2],
+        () => resolver.findOrCreate(fake.connection, cwd).pipe(Effect.result),
+        { concurrency: "unbounded" }
+      )
+      assert.deepStrictEqual(results.map((r) => r._tag).toSorted(), ["Failure", "Success"])
+      assert.strictEqual(yield* created(fake), 2)
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
   it.live("records a new agent in the project's settings, so later processes keep talking to it", () =>
     Effect.gen(function*() {
       const fs = yield* FileSystem.FileSystem

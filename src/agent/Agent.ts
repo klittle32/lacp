@@ -23,6 +23,7 @@ import {
   Layer,
   Option,
   Path,
+  RcMap,
   Scope,
   Semaphore,
   Stream,
@@ -139,6 +140,13 @@ export class Agent extends Context.Service<Agent, {
       const bridges = yield* Bridge.McpBridges
       const layerScope = yield* Effect.scope
       const sessions = new Map<string, Session>()
+      /** One open or close at a time per session id; a lock lasts only while it is in use. */
+      const sessionLocks = yield* RcMap.make({ lookup: (_sessionId: string) => Semaphore.make(1) })
+      const withSessionLock = (sessionId: string) => <A, E>(effect: Effect.Effect<A, E>) =>
+        RcMap.get(sessionLocks, sessionId).pipe(
+          Effect.flatMap((lock) => Semaphore.withPermits(lock, 1)(effect)),
+          Effect.scoped
+        )
       /** What the frame handlers (Frames.ts) need from here. */
       const deps: Deps = { config, client }
 
@@ -459,7 +467,7 @@ export class Agent extends Context.Service<Agent, {
         const existing = open !== undefined && open.cwd === input.cwd && Equal.equals(open.mcpServers, input.mcpServers)
           ? open
           : undefined
-        if (open !== undefined && existing === undefined) yield* closeSession(open.id)
+        if (open !== undefined && existing === undefined) yield* closeOpenSession(open.id)
         if (existing !== undefined) {
           if (Option.isSome(existing.attachment)) {
             const attachment = yield* ensureAttached(existing, existing.attachment.value)
@@ -488,7 +496,7 @@ export class Agent extends Context.Service<Agent, {
           })
         }
         return yield* publish(session)
-      })
+      }, (effect, input) => withSessionLock(input.sessionId)(effect))
 
       const listSessions = Effect.fn("Agent.listSessions")(function*(input: {
         readonly cwd: Option.Option<string>
@@ -734,7 +742,8 @@ export class Agent extends Context.Service<Agent, {
         }
       )
 
-      const closeSession = Effect.fn("Agent.closeSession")(function*(sessionId: string) {
+      /** Closes a session; the caller holds its lock. */
+      const closeOpenSession = Effect.fnUntraced(function*(sessionId: string) {
         const session = sessions.get(sessionId)
         if (session === undefined) return
         if (Option.isSome(session.turn)) {
@@ -747,6 +756,10 @@ export class Agent extends Context.Service<Agent, {
         }
         sessions.delete(sessionId)
         yield* Scope.close(session.scope, Exit.void)
+      })
+
+      const closeSession = Effect.fn("Agent.closeSession")(function*(sessionId: string) {
+        yield* withSessionLock(sessionId)(closeOpenSession(sessionId))
       })
 
       return Agent.of({

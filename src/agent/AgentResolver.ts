@@ -7,7 +7,7 @@
  * Code records the agents it creates, so later sessions (and `letta`) there
  * keep talking to it.
  */
-import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
+import { Context, Effect, FileSystem, Layer, Option, Path, Schema, Semaphore } from "effect"
 import { LacpConfig } from "../Config.ts"
 import { Host } from "../Host.ts"
 import type { LettaConnection } from "../letta/AppServer.ts"
@@ -46,6 +46,8 @@ export class AgentResolver extends Context.Service<AgentResolver, {
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
       const byCwd = new Map<string, string>()
+      /** One creation at a time, so sessions that start together in a directory share its new agent. */
+      const createLock = yield* Semaphore.make(1)
 
       const readSettings = (file: string) =>
         fs.readFileString(file).pipe(
@@ -150,7 +152,12 @@ export class AgentResolver extends Context.Service<AgentResolver, {
 
       const findOrCreate = Effect.fn("AgentResolver.findOrCreate")(function*(conn: LettaConnection, cwd: string) {
         const found = yield* find(conn, cwd)
-        return Option.isSome(found) ? found.value : yield* create(conn, cwd)
+        if (Option.isSome(found)) return found.value
+        return yield* Semaphore.withPermits(createLock, 1)(Effect.suspend(() => {
+          // A caller that held the lock meanwhile may have created this directory's agent.
+          const created = byCwd.get(cwd)
+          return created === undefined ? create(conn, cwd) : Effect.succeed(created)
+        }))
       })
 
       const retrieve = Effect.fn("AgentResolver.retrieve")(function*(conn: LettaConnection, agentId: string) {
