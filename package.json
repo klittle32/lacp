@@ -1,6 +1,6 @@
 {
   "name": "@kylelittle/lacp",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "An Agent Client Protocol (ACP) server for Letta Code, written in Effect",
   "keywords": [
     "acp",
