@@ -274,6 +274,77 @@ describe("concurrent session requests", () => {
     }))
 })
 
+describe("a session that fails to open", () => {
+  const failedReplay = { success: false, error: "history unavailable" }
+  const emptyHistory = { success: true, messages: [], has_more: false, next_before: null }
+
+  it.live("reopens on its own conversation after its history could not be replayed", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* fake.on("conversation_messages_list", () => failedReplay)
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const failed = yield* client.request("session/resume", {
+        sessionId: "conv-old",
+        cwd: "/work",
+        replayFrom: { type: "start" }
+      })
+      assert.isDefined(failed.error)
+
+      yield* fake.on("conversation_messages_list", () => emptyHistory)
+      const resumed = yield* client.request("session/resume", {
+        sessionId: "conv-old",
+        cwd: "/work",
+        replayFrom: { type: "start" }
+      })
+      assert.isDefined(resumed.result)
+      const starts = yield* sent(fake, "runtime_start")
+      assert.deepStrictEqual(starts.map((s) => s.conversation_id), ["conv-old", "conv-old"])
+
+      yield* client.request("session/prompt", { sessionId: "conv-old", prompt: text("hello") })
+      const input = (yield* fake.waitFor(isInput)) as any
+      assert.strictEqual(input.runtime.conversation_id, "conv-old")
+      assert.strictEqual((yield* sent(fake, "runtime_start")).length, 2)
+    }))
+
+  it.live("is not found, rather than given a new conversation, until it is opened again", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* fake.on("conversation_messages_list", () => failedReplay)
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      yield* client.request("session/resume", {
+        sessionId: "conv-old",
+        cwd: "/work",
+        replayFrom: { type: "start" }
+      })
+      const prompted = yield* client.request("session/prompt", { sessionId: "conv-old", prompt: text("x") })
+      assert.strictEqual(prompted.error?.code, -32002)
+      assert.strictEqual((yield* sent(fake, "runtime_start")).length, 1)
+    }))
+
+  it.live("reopens after its opening was cancelled during the replay", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* fake.on("conversation_messages_list", () => Effect.never)
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      yield* client.raw(JSON.stringify({
+        jsonrpc: "2.0",
+        id: "stuck",
+        method: "session/resume",
+        params: { sessionId: "conv-old", cwd: "/work", replayFrom: { type: "start" } }
+      }))
+      yield* fake.waitFor((c) => c.type === "conversation_messages_list")
+      yield* client.notify("$/cancel_request", { requestId: "stuck" })
+      yield* client.next((m) => m.id === "stuck")
+
+      const resumed = yield* client.request("session/resume", { sessionId: "conv-old", cwd: "/work" })
+      assert.isDefined(resumed.result)
+      assert.strictEqual((yield* sent(fake, "runtime_start")).length, 2)
+    }))
+})
+
 describe("SessionIds", () => {
   const ids = (home: string) =>
     Layer.build(SessionIds.layer.pipe(

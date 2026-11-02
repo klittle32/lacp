@@ -218,10 +218,15 @@ export class Agent extends Context.Service<Agent, {
       /**
        * Opens a session in a new scope: Letta and the client's MCP servers
        * (rooted at the session's directory) connect concurrently, then `open`
-       * builds the session. The scope is closed again if opening fails.
+       * builds the session. If opening fails, the session is forgotten and its
+       * scope closed again.
        */
       const inSessionScope = <A, E>(
-        input: { readonly cwd: string; readonly mcpServers: ReadonlyArray<McpServerConfig> },
+        input: {
+          readonly sessionId: string
+          readonly cwd: string
+          readonly mcpServers: ReadonlyArray<McpServerConfig>
+        },
         open: (scope: Scope.Closeable, conn: LettaConnection, mcp: Bridge.McpBridge) => Effect.Effect<A, E>
       ) =>
         Scope.fork(layerScope).pipe(Effect.flatMap((scope) =>
@@ -233,7 +238,12 @@ export class Agent extends Context.Service<Agent, {
             }).pipe(Scope.provide(scope))
           ], { concurrency: "unbounded" }).pipe(
             Effect.flatMap(([conn, mcp]) => open(scope, conn, mcp)),
-            Effect.onError(() => Scope.close(scope, Exit.void))
+            // `open` may have registered the session already; a closed one must not be found again.
+            Effect.onError(() =>
+              Effect.sync(() => sessions.delete(input.sessionId)).pipe(
+                Effect.andThen(Scope.close(scope, Exit.void))
+              )
+            )
           )
         ))
 
