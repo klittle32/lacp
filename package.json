@@ -41,15 +41,15 @@
     "smoke:t3": "node scripts/t3-smoke.ts"
   },
   "dependencies": {
-    "@effect/platform-node": "4.1.0",
-    "effect": "4.1.0"
+    "@effect/platform-node": "4.1.1",
+    "effect": "4.1.1"
   },
   "devDependencies": {
     "@dprint/json": "0.25.2",
     "@dprint/markdown": "0.28.2",
     "@dprint/typescript": "0.96.1",
     "@effect/tsgo": "0.63.0",
-    "@effect/vitest": "4.1.0",
+    "@effect/vitest": "4.1.1",
     "@types/node": "26.6.6",
     "dprint": "0.64.3",
     "oxlint": "1.90.0",
