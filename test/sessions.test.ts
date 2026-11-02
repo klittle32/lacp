@@ -250,46 +250,23 @@ describe("sessions use existing agents only", () => {
 })
 
 describe("concurrent session requests", () => {
-  /** A conversation lookup slow enough for concurrent requests to overlap. */
-  const slowRetrieve = (fake: Fake.FakeLetta) =>
-    fake.on("conversation_retrieve", (command: any) =>
-      Effect.sleep("30 millis").pipe(Effect.as({
-        success: true,
-        conversation: { id: command.conversation_id, agent_id: Fake.AGENT_ID }
-      })))
-
-  const chunks = (client: { readonly updates: Effect.Effect<ReadonlyArray<any>> }) =>
-    client.updates.pipe(Effect.map((all) => all.filter((u) => u.sessionUpdate === "agent_message_chunk")))
-
-  const say = (fake: Fake.FakeLetta, conversation: string) =>
-    fake.emit(Fake.delta(conversation, {
-      message_type: "assistant_message",
-      id: "m1",
-      otid: "m1",
-      run_id: "r1",
-      seq_id: 1,
-      content: [{ type: "text", text: "hi" }]
-    }))
+  const resume = (cwd = "/work") => ({ sessionId: "conv-old", cwd })
 
   it.live("opens a session resumed twice at once only once", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      yield* slowRetrieve(fake)
+      const opening = yield* fake.gate("conversation_retrieve")
       const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
-      const resumes = yield* Effect.forEach(
-        [1, 2],
-        () => client.request("session/resume", { sessionId: "conv-old", cwd: "/work" }),
-        { concurrency: "unbounded" }
-      )
-      assert.isTrue(resumes.every((r) => r.result !== undefined))
+      const first = yield* client.start("session/resume", resume())
+      yield* opening.entered
+      const second = yield* client.start("session/resume", resume())
+      yield* client.dispatched
+      yield* opening.open
+      assert.isDefined((yield* first.response).result)
+      assert.isDefined((yield* second.response).result)
       assert.strictEqual((yield* sent(fake, "runtime_start")).length, 1)
-
-      // Only one runtime follows the conversation, so its output reaches the client once.
-      yield* say(fake, "conv-old")
-      yield* client.update((u) => u.sessionUpdate === "agent_message_chunk")
-      yield* Effect.sleep("30 millis")
-      assert.strictEqual((yield* chunks(client)).length, 1)
+      assert.strictEqual(yield* fake.runtimes, 1)
     }))
 
   it.live("opens a session that has no conversation yet, resumed twice at once, only once", () =>
@@ -300,68 +277,172 @@ describe("concurrent session requests", () => {
       const sessionId = (yield* client.request("session/new", { cwd: "/work" })).result.sessionId as string
       yield* client.request("session/close", { sessionId })
       const before = (yield* sent(fake, "agent_retrieve")).length
-      yield* Effect.forEach(
-        [1, 2],
-        () => client.request("session/resume", { sessionId, cwd: "/work" }),
-        { concurrency: "unbounded" }
-      )
+      const opening = yield* fake.gate("agent_retrieve")
+      const first = yield* client.start("session/resume", { sessionId, cwd: "/work" })
+      yield* opening.entered
+      const second = yield* client.start("session/resume", { sessionId, cwd: "/work" })
+      yield* client.dispatched
+      yield* opening.open
+      yield* first.response
+      yield* second.response
       assert.strictEqual((yield* sent(fake, "agent_retrieve")).length - before, 1)
     }))
 
   it.live("leaves one live runtime when a session is resumed from two directories at once", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      yield* slowRetrieve(fake)
+      const opening = yield* fake.gate("conversation_retrieve")
       const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
-      yield* Effect.forEach(
-        ["/work", "/elsewhere"],
-        (cwd) => client.request("session/resume", { sessionId: "conv-old", cwd }),
-        { concurrency: "unbounded" }
-      )
-      yield* say(fake, "conv-old")
-      yield* client.update((u) => u.sessionUpdate === "agent_message_chunk")
-      yield* Effect.sleep("30 millis")
-      assert.strictEqual((yield* chunks(client)).length, 1)
+      const first = yield* client.start("session/resume", resume("/work"))
+      yield* opening.entered
+      const second = yield* client.start("session/resume", resume("/elsewhere"))
+      yield* client.dispatched
+      yield* opening.open
+      yield* first.response
+      yield* second.response
+      // The second replaces the first, so the conversation's output reaches the client once.
+      assert.strictEqual((yield* sent(fake, "runtime_start")).length, 2)
+      assert.strictEqual(yield* fake.runtimes, 1)
     }))
 
   it.live("lets a session open after a cancelled attempt to open it", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      yield* fake.on("conversation_retrieve", () => Effect.never)
+      const opening = yield* fake.gate("conversation_retrieve")
       const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
-      yield* client.raw(JSON.stringify({
-        jsonrpc: "2.0",
-        id: "stuck",
-        method: "session/resume",
-        params: { sessionId: "conv-old", cwd: "/work" }
-      }))
-      yield* fake.waitFor((c) => c.type === "conversation_retrieve")
-      yield* client.notify("$/cancel_request", { requestId: "stuck" })
-      yield* client.next((m) => m.id === "stuck")
+      const stuck = yield* client.start("session/resume", resume())
+      yield* opening.entered
+      yield* client.notify("$/cancel_request", { requestId: stuck.id })
+      assert.isDefined((yield* stuck.response).error)
 
-      yield* slowRetrieve(fake)
-      const resumed = yield* client.request("session/resume", { sessionId: "conv-old", cwd: "/work" })
-      assert.isDefined(resumed.result)
+      yield* opening.open
+      assert.isDefined((yield* client.request("session/resume", resume())).result)
     }))
 
   it.live("closes a session whose close arrives while it is still opening", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      yield* slowRetrieve(fake)
+      const opening = yield* fake.gate("conversation_retrieve")
       const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
-      yield* Effect.all([
-        client.request("session/resume", { sessionId: "conv-old", cwd: "/work" }),
-        Effect.sleep("5 millis").pipe(
-          Effect.andThen(client.request("session/close", { sessionId: "conv-old" }))
-        )
-      ], { concurrency: "unbounded" })
+      const resumed = yield* client.start("session/resume", resume())
+      yield* opening.entered
+      const closed = yield* client.start("session/close", { sessionId: "conv-old" })
+      yield* client.dispatched
+      yield* opening.open
+      assert.isDefined((yield* resumed.response).result)
+      assert.isDefined((yield* closed.response).result)
+      assert.strictEqual(yield* fake.runtimes, 0)
       assert.strictEqual(
         (yield* client.request("session/prompt", { sessionId: "conv-old", prompt: text("x") })).error?.code,
         -32002
       )
+    }))
+})
+
+describe("requests for a session that is still opening", () => {
+  const resumeWithReplay = { sessionId: "conv-old", cwd: "/work", replayFrom: { type: "start" } }
+
+  it.live("sends a prompt to the session's own conversation, not a new one", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const replaying = yield* fake.gate("conversation_messages_list")
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const resumed = yield* client.start("session/resume", resumeWithReplay)
+      yield* replaying.entered
+      const prompted = yield* client.start("session/prompt", { sessionId: "conv-old", prompt: text("hello") })
+      yield* client.dispatched
+      yield* replaying.open
+      assert.isDefined((yield* resumed.response).result)
+      assert.isDefined((yield* prompted.response).result)
+      const starts = yield* sent(fake, "runtime_start")
+      assert.deepStrictEqual(starts.map((s) => s.conversation_id), ["conv-old"])
+      assert.isUndefined(starts[0].create_conversation)
+      const input = (yield* fake.waitFor(isInput)) as any
+      assert.strictEqual(input.runtime.conversation_id, "conv-old")
+    }))
+
+  it.live("applies a config change to the session's own conversation", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const replaying = yield* fake.gate("conversation_messages_list")
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const resumed = yield* client.start("session/resume", resumeWithReplay)
+      yield* replaying.entered
+      const changed = yield* client.start("session/set_config_option", {
+        sessionId: "conv-old",
+        configId: "mode",
+        type: "id",
+        value: "acceptEdits"
+      })
+      yield* client.dispatched
+      yield* replaying.open
+      yield* resumed.response
+      assert.isDefined((yield* changed.response).result)
+      const changes = yield* sent(fake, "change_device_state")
+      assert.deepStrictEqual(changes.at(-1).payload, { mode: "acceptEdits" })
+      assert.strictEqual(changes.at(-1).runtime.conversation_id, "conv-old")
+    }))
+
+  it.live("reports a prompt as not found, and creates nothing, when the opening fails", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* fake.on("conversation_messages_list", () => ({ success: false, error: "history unavailable" }))
+      const replaying = yield* fake.gate("conversation_messages_list")
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const resumed = yield* client.start("session/resume", resumeWithReplay)
+      yield* replaying.entered
+      const prompted = yield* client.start("session/prompt", { sessionId: "conv-old", prompt: text("hello") })
+      yield* client.dispatched
+      yield* replaying.open
+      assert.isDefined((yield* resumed.response).error)
+      assert.strictEqual((yield* prompted.response).error?.code, -32002)
+      assert.deepStrictEqual((yield* sent(fake, "runtime_start")).map((s) => s.conversation_id), ["conv-old"])
+      assert.strictEqual(yield* fake.runtimes, 0)
+    }))
+
+  it.live("keeps an open session usable when replaying its history again fails", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      yield* client.request("session/resume", { sessionId: "conv-old", cwd: "/work" })
+      yield* fake.on("conversation_messages_list", () => ({ success: false, error: "history unavailable" }))
+      assert.isDefined((yield* client.request("session/resume", resumeWithReplay)).error)
+      assert.strictEqual(yield* fake.runtimes, 1)
+
+      assert.isDefined((yield* client.request("session/prompt", { sessionId: "conv-old", prompt: text("x") })).result)
+      assert.strictEqual((yield* sent(fake, "runtime_start")).length, 1)
+      const input = (yield* fake.waitFor(isInput)) as any
+      assert.strictEqual(input.runtime.conversation_id, "conv-old")
+    }))
+})
+
+describe("cancelling a close", () => {
+  it.live("leaves the session open while the close still waits for its turn to end", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const aborting = yield* fake.gate("abort_message")
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const sessionId = (yield* client.request("session/new", { cwd: "/work" })).result.sessionId as string
+      yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
+      yield* fake.waitFor(isInput)
+
+      const closing = yield* client.start("session/close", { sessionId })
+      yield* aborting.entered
+      yield* client.notify("$/cancel_request", { requestId: closing.id })
+      assert.isDefined((yield* closing.response).error)
+      assert.strictEqual(yield* fake.runtimes, 1)
+
+      yield* aborting.open
+      assert.isDefined((yield* client.request("session/close", { sessionId })).result)
+      assert.strictEqual(yield* fake.runtimes, 0)
     }))
 })
 
@@ -417,18 +498,17 @@ describe("a session that fails to open", () => {
   it.live("reopens after its opening was cancelled during the replay", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      yield* fake.on("conversation_messages_list", () => Effect.never)
+      const replaying = yield* fake.gate("conversation_messages_list")
       const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
-      yield* client.raw(JSON.stringify({
-        jsonrpc: "2.0",
-        id: "stuck",
-        method: "session/resume",
-        params: { sessionId: "conv-old", cwd: "/work", replayFrom: { type: "start" } }
-      }))
-      yield* fake.waitFor((c) => c.type === "conversation_messages_list")
-      yield* client.notify("$/cancel_request", { requestId: "stuck" })
-      yield* client.next((m) => m.id === "stuck")
+      const stuck = yield* client.start("session/resume", {
+        sessionId: "conv-old",
+        cwd: "/work",
+        replayFrom: { type: "start" }
+      })
+      yield* replaying.entered
+      yield* client.notify("$/cancel_request", { requestId: stuck.id })
+      assert.isDefined((yield* stuck.response).error)
 
       const resumed = yield* client.request("session/resume", { sessionId: "conv-old", cwd: "/work" })
       assert.isDefined(resumed.result)

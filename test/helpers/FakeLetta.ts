@@ -4,7 +4,7 @@
  * Commands are recorded and answered by overridable handlers; tests push
  * runtime frames (stream deltas, approvals, turn ends) with `emit`.
  */
-import { Effect, PubSub, Ref, Schema } from "effect"
+import { Deferred, Effect, PubSub, Ref, Schema } from "effect"
 import type { Frame, LettaConnection, Reply } from "../../src/letta/AppServer.ts"
 import { LettaRequestFailed } from "../../src/letta/Errors.ts"
 import { type Command, FrameHeader } from "../../src/letta/Protocol.ts"
@@ -24,10 +24,22 @@ export interface FakeLetta {
   emit(frame: Record<string, unknown>): Effect.Effect<void>
   /** Overrides the response to a command type. */
   on(type: Command["type"], handler: Handler): Effect.Effect<void>
+  /**
+   * Holds commands of `type` back until the gate opens, then answers them as
+   * usual. `entered` completes once one has arrived.
+   */
+  gate(type: Command["type"]): Effect.Effect<Gate>
+  /** How many runtimes follow Letta's frames right now. */
+  readonly runtimes: Effect.Effect<number>
   /** Waits until a command matching `predicate` has been sent. */
   waitFor(predicate: (command: Command) => boolean): Effect.Effect<Command>
   /** The conversation `runtime_start` created last (sessions get one with their first prompt). */
   readonly conversation: Effect.Effect<string>
+}
+
+export interface Gate {
+  readonly entered: Effect.Effect<void>
+  readonly open: Effect.Effect<void>
 }
 
 export const AGENT_ID = "agent-test"
@@ -139,6 +151,7 @@ export const turnFinished = (conversationId: string, stopReason = "end_turn", ex
 
 export const make = Effect.gen(function*() {
   const frames = yield* PubSub.unbounded<Frame>()
+  const runtimes = yield* Ref.make(0)
   const commands = yield* Ref.make<ReadonlyArray<Command>>([])
   const sent = yield* PubSub.unbounded<Command>()
   const conversations = { next: 1, created: new Array<string>() }
@@ -271,7 +284,10 @@ export const make = Effect.gen(function*() {
         return decoded
       }),
     send: (command) => record(command),
-    subscribe: PubSub.subscribe(frames),
+    subscribe: Effect.acquireRelease(
+      Ref.update(runtimes, (n) => n + 1),
+      () => Ref.update(runtimes, (n) => n - 1)
+    ).pipe(Effect.andThen(PubSub.subscribe(frames))),
     isAlive: Effect.succeed(true),
     closed: Effect.never
   }
@@ -308,6 +324,22 @@ export const make = Effect.gen(function*() {
     commands,
     emit,
     on: (type, handler) => Effect.sync(() => handlers.set(type, handler)),
+    gate: (type) =>
+      Effect.gen(function*() {
+        const entered = yield* Deferred.make<void>()
+        const open = yield* Deferred.make<void>()
+        const usual = handlers.get(type) ?? defaults[type]
+        handlers.set(type, (command) =>
+          Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(open)),
+            Effect.andThen(Effect.suspend(() => {
+              const answer = usual === undefined ? { success: false, error: `unhandled ${type}` } : usual(command)
+              return Effect.isEffect(answer) ? answer : Effect.succeed(answer)
+            }))
+          ))
+        return { entered: Deferred.await(entered), open: Deferred.succeed(open, undefined).pipe(Effect.asVoid) }
+      }),
+    runtimes: Ref.get(runtimes),
     waitFor,
     conversation: Effect.suspend(() => {
       const last = conversations.created.at(-1)

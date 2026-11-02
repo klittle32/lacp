@@ -154,11 +154,16 @@ export class Agent extends Context.Service<Agent, {
 
       const connection = appServer.connection.pipe(Effect.mapError(unavailable))
 
+      /**
+       * The session, once any open or close of its id has finished: a session
+       * still opening has no runtime yet, so a prompt would give it a new
+       * conversation instead of its own.
+       */
       const getSession = (sessionId: string) =>
-        Effect.suspend(() => {
+        withSessionLock(sessionId)(Effect.suspend(() => {
           const session = sessions.get(sessionId)
           return session === undefined ? Effect.fail(new SessionNotFound({ sessionId })) : Effect.succeed(session)
-        })
+        }))
 
       const emit = (session: Session, event: SessionEvent) => client.emit(session.id, event)
 
@@ -441,11 +446,12 @@ export class Agent extends Context.Service<Agent, {
 
       // --- operations -------------------------------------------------------
 
-      const newSession = Effect.fn("Agent.newSession")(function*(input: {
+      const openNewSession = Effect.fn("Agent.newSession")(function*(input: {
+        readonly sessionId: string
         readonly cwd: string
         readonly mcpServers: ReadonlyArray<McpServerConfig>
       }) {
-        const session = yield* openPending({ ...input, sessionId: yield* sessionIds.make })
+        const session = yield* openPending(input)
         yield* Effect.logInfo(
           `Opened session ${session.id}` +
             ` (agent ${session.agentId}) in ${input.cwd}` +
@@ -454,6 +460,21 @@ export class Agent extends Context.Service<Agent, {
         )
         return yield* publish(session)
       })
+
+      /**
+       * Until this returns the session's id, nobody else knows it, so an
+       * interrupted request closes the session. Once it has returned, the session
+       * is the caller's.
+       */
+      const newSession = (input: {
+        readonly cwd: string
+        readonly mcpServers: ReadonlyArray<McpServerConfig>
+      }) =>
+        sessionIds.make.pipe(
+          Effect.flatMap((sessionId) =>
+            openNewSession({ ...input, sessionId }).pipe(Effect.onInterrupt(() => closeOpenSession(sessionId)))
+          )
+        )
 
       const loadSession = Effect.fn("Agent.loadSession")(function*(input: {
         readonly sessionId: string
@@ -753,8 +774,11 @@ export class Agent extends Context.Service<Agent, {
             yield* completeTurn(deps, session, { stopReason: "cancelled", error: Option.none() })
           }
         }
-        sessions.delete(sessionId)
-        yield* Scope.close(session.scope, Exit.void)
+        // Waiting above can be cancelled, leaving the session open; from here it must end whole.
+        yield* Effect.uninterruptible(Effect.suspend(() => {
+          sessions.delete(sessionId)
+          return Scope.close(session.scope, Exit.void)
+        }))
       })
 
       const closeSession = Effect.fn("Agent.closeSession")(function*(sessionId: string) {

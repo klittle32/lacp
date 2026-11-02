@@ -40,10 +40,22 @@ export interface Message {
   readonly error?: { readonly code: number; readonly message: string; readonly data?: unknown }
 }
 
+export interface StartedRequest {
+  readonly id: number
+  readonly response: Effect.Effect<Message>
+}
+
 export type PermissionPolicy = (params: any) => unknown
 
 export interface TestClient {
   request(method: string, params?: unknown): Effect.Effect<Message>
+  /**
+   * Sends a request now, so that it reaches the server before anything sent
+   * later, and returns its id and a way to await its response.
+   */
+  start(method: string, params?: unknown): Effect.Effect<StartedRequest>
+  /** Returns once the server has read and dispatched everything sent so far. */
+  readonly dispatched: Effect.Effect<void>
   notify(method: string, params?: unknown): Effect.Effect<void>
   /** Sends a raw line. */
   raw(line: string): Effect.Effect<void>
@@ -128,15 +140,23 @@ export const startWith = <E>(
       )
     )
 
+    const startRequest = (method: string, params?: unknown): Effect.Effect<StartedRequest> =>
+      Effect.gen(function*() {
+        const id = nextId++
+        const waiter = yield* Deferred.make<Message>()
+        pending.set(id, waiter)
+        yield* write({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) })
+        return { id, response: Deferred.await(waiter) }
+      })
+
     const client: TestClient = {
-      request: (method, params) =>
-        Effect.gen(function*() {
-          const id = nextId++
-          const waiter = yield* Deferred.make<Message>()
-          pending.set(id, waiter)
-          yield* write({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) })
-          return yield* Deferred.await(waiter)
-        }),
+      request: (method, params) => startRequest(method, params).pipe(Effect.flatMap((started) => started.response)),
+      start: startRequest,
+      // The server reads requests in order and answers an unknown method without doing anything.
+      dispatched: startRequest("test/dispatched").pipe(
+        Effect.flatMap((started) => started.response),
+        Effect.asVoid
+      ),
       notify: (method, params) => write({ jsonrpc: "2.0", method, ...(params === undefined ? {} : { params }) }),
       raw: (line) => Queue.offer(input, line).pipe(Effect.asVoid),
       next: (predicate) =>

@@ -66,6 +66,11 @@ the chosen model and effort to the new conversation, and records the pair in `Se
 status then supplies the session's real commands. A session lock serializes this with config changes made
 meanwhile.
 
+Opening and closing a session id take a lock of that id, and so does looking a session up for a prompt or config
+change: a request for a session that is still opening waits for it, instead of finding it without its runtime and
+giving it a new conversation. A close can be cancelled while it waits for the session's turn to end, which leaves
+the session open; removing the session and closing its scope are one uninterruptible step.
+
 `SessionIds` keeps each pair in memory and as two small files in `~/.letta/lacp/sessions` (one per side), so a
 `lacp-` id resumes or loads its conversation in this process or a later one, and `session/list` reports
 conversations under the id they were created for. A `lacp-` id without a conversation reopens as a pending
