@@ -44,7 +44,7 @@ export interface Session {
    */
   readonly id: string
   /** The Letta agent; a session opened without one gets it with its conversation (request fiber). */
-  agentId: Option.Option<string>
+  readonly agentId: string
   readonly cwd: string
   readonly scope: Scope.Closeable
   readonly translator: Translator.Translator
@@ -144,7 +144,7 @@ export const updateTools = Effect.fnUntraced(function*(session: Session) {
 
 export interface SessionInput {
   readonly id: string
-  readonly agentId: Option.Option<string>
+  readonly agentId: string
   readonly cwd: string
   readonly scope: Scope.Closeable
   readonly mcp: Bridge.McpBridge

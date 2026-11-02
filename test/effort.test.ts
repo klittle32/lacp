@@ -96,11 +96,11 @@ describe("effort", () => {
       )
     }))
 
-  it.live("offers effort before the first prompt creates the session's agent", () =>
+  it.live("offers effort before the first prompt creates the session's conversation", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const cwd = projectDir()
-      const client = yield* start(fake, { agentId: Option.none() })
+      const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
       const created = yield* client.request("session/new", { cwd })
       const sessionId = created.result.sessionId as string
@@ -109,9 +109,7 @@ describe("effort", () => {
       assert.strictEqual(option(options, "model").currentValue, Fake.MODEL)
       assert.strictEqual(option(options, "reasoning_effort").currentValue, "medium")
       yield* set(client, sessionId, "reasoning_effort", "high")
-      assert.strictEqual((yield* sent(fake, "create_agent")).length, 0)
       yield* prompt(client, sessionId)
-      assert.strictEqual((yield* sent(fake, "create_agent")).length, 1)
       assert.deepStrictEqual(yield* updates(fake), [{ model_id: "sonnet-high", model_handle: Fake.MODEL }])
     }))
 
@@ -133,7 +131,7 @@ describe("effort", () => {
         },
         created: { agent: false, conversation: true }
       }))
-      const client = yield* start(fake, { agentId: Option.none() })
+      const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
       const created = yield* client.request("session/new", { cwd })
       assert.strictEqual(option(created.result.configOptions, "reasoning_effort").currentValue, "medium")

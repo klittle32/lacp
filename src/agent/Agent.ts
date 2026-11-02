@@ -52,7 +52,7 @@ import type { McpServerConfig } from "../mcp/Config.ts"
 import { AGENT_NAME, AGENT_TITLE, VERSION } from "../Version.ts"
 import { AgentResolver } from "./AgentResolver.ts"
 import { AcpClient } from "./Client.ts"
-import { type AgentError, AgentUnavailable, PromptRejected, SessionNotFound, unavailable } from "./Errors.ts"
+import { type AgentError, PromptRejected, SessionNotFound, unavailable } from "./Errors.ts"
 import { completeTurn, consume, type Deps, emitAll, logTurn, onTurnFinished, setForeground, watch } from "./Frames.ts"
 import { plainText, slashCommand, toLettaContent } from "./Prompt.ts"
 import { type StartedRuntime, startRuntime } from "./Runtime.ts"
@@ -191,12 +191,8 @@ export class Agent extends Context.Service<Agent, {
         const conn = yield* connection
         if (current.generation === conn.generation) return current
         yield* Effect.logInfo(`Re-attaching session ${session.id} to the restarted Letta Code App Server`)
-        const agentId = Option.orElse(session.agentId, () => Option.fromNullishOr(current.runtime.agent_id))
-        if (Option.isNone(agentId)) {
-          return yield* new AgentUnavailable({ message: `Session ${session.id} has no Letta agent`, auth: false })
-        }
         const started = yield* startRuntime(conn, session.scope, {
-          agentId: agentId.value,
+          agentId: session.agentId,
           conversationId: Option.some(current.runtime.conversation_id),
           cwd: session.cwd,
           tools: yield* session.mcp.tools,
@@ -302,8 +298,8 @@ export class Agent extends Context.Service<Agent, {
 
       /**
        * Opens a session that has no Letta conversation yet, without touching
-       * Letta beyond reading the agent and its models: the conversation (and,
-       * where none is set up, the agent) is created by the first prompt.
+       * Letta beyond reading the agent and its models: the conversation is
+       * created by the first prompt. It takes an agent that exists.
        */
       const openPending = (input: {
         readonly sessionId: string
@@ -312,12 +308,9 @@ export class Agent extends Context.Service<Agent, {
       }) =>
         inSessionScope(input, (scope, conn, mcp) =>
           Effect.gen(function*() {
-            const agentId = yield* agents.find(conn, input.cwd)
+            const agentId = yield* agents.resolve(conn, input.cwd)
             const [agent, models] = yield* Effect.all([
-              Option.match(agentId, {
-                onNone: () => Effect.succeedNone,
-                onSome: (id) => agents.retrieve(conn, id).pipe(Effect.asSome)
-              }),
+              agents.retrieve(conn, agentId),
               settings.catalog(conn)
             ], { concurrency: "unbounded" })
             const session = yield* makeSession({
@@ -328,7 +321,7 @@ export class Agent extends Context.Service<Agent, {
               mcp,
               mcpServers: input.mcpServers,
               settings: initialSettings(
-                { agent: Option.getOrNull(agent) },
+                { agent },
                 models,
                 Option.orElse(config.permissionMode, () => Option.some(DEFAULT_PERMISSION_MODE))
               ),
@@ -358,7 +351,7 @@ export class Agent extends Context.Service<Agent, {
 
       /**
        * Returns a live attachment to the session's conversation, creating the
-       * conversation (and the agent, for a session without one) on first use.
+       * conversation on first use.
        */
       const materialize = (session: Session) =>
         withConversation(session, { pending: createConversation(session), attached: Effect.succeed })
@@ -367,9 +360,7 @@ export class Agent extends Context.Service<Agent, {
       const createConversation = Effect.fnUntraced(function*(session: Session) {
         const before = configOptions(session.settings)
         const conn = yield* connection
-        const agentId = Option.isSome(session.agentId)
-          ? session.agentId.value
-          : yield* agents.findOrCreate(conn, session.cwd)
+        const agentId = session.agentId
         const started = yield* startRuntime(conn, session.scope, {
           agentId,
           conversationId: Option.none(),
@@ -378,7 +369,6 @@ export class Agent extends Context.Service<Agent, {
           mode: session.settings.mode
         })
         const conversationId = started.runtime.conversation_id
-        session.agentId = Option.some(agentId)
         const attachment = yield* attach(session, started, conn)
         yield* settings.realize(
           session.settings,
@@ -434,7 +424,7 @@ export class Agent extends Context.Service<Agent, {
             })
             const session = yield* makeSession({
               id: input.sessionId,
-              agentId: Option.some(stored.agentId),
+              agentId: stored.agentId,
               cwd: input.cwd,
               scope,
               mcp,
@@ -458,8 +448,7 @@ export class Agent extends Context.Service<Agent, {
         const session = yield* openPending({ ...input, sessionId: yield* sessionIds.make })
         yield* Effect.logInfo(
           `Opened session ${session.id}` +
-            Option.match(session.agentId, { onNone: () => "", onSome: (id) => ` (agent ${id})` }) +
-            ` in ${input.cwd}` +
+            ` (agent ${session.agentId}) in ${input.cwd}` +
             (session.mcp.connected.length > 0 ? ` with MCP servers: ${session.mcp.connected.join(", ")}` : "") +
             "; Letta creates its conversation with the first prompt"
         )

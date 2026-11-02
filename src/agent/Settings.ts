@@ -82,9 +82,8 @@ const currentChoice = (settings: SessionSettings) =>
   Option.flatMap(settings.model, (handle) => Models.findChoice(settings.models, handle, settings.contextWindow))
 
 /**
- * The model a session shows: its own, or, before Letta has recorded one (a
- * session whose agent the first prompt creates), the one Letta Code gives
- * new agents.
+ * The model a session shows: its own, or, before Letta has recorded one (an
+ * agent without a model), the one Letta Code gives new agents.
  */
 const shownChoice = (settings: SessionSettings) =>
   Option.isSome(settings.model) ? currentChoice(settings) : Models.defaultChoice(settings.models)

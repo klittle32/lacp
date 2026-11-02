@@ -1,18 +1,17 @@
 /**
  * Which Letta agent a session talks to: the configured one (`LETTA_AGENT_ID`),
  * else the one the host's Letta Code last used in the session's directory (as
- * `letta` itself would pick it), else, where a session needs one, a new one.
- * The choice is remembered per directory for the life of the process, and a
- * new agent also in the directory's `.letta/settings.local.json`, as Letta
- * Code records the agents it creates, so later sessions (and `letta`) there
- * keep talking to it.
+ * `letta` itself would pick it). The choice is remembered per directory for
+ * the life of the process. lacp never creates agents: with none to use, a
+ * session cannot open.
  */
-import { Context, Effect, FileSystem, Layer, Option, Path, Schema, Semaphore } from "effect"
+import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
 import { LacpConfig } from "../Config.ts"
 import { Host } from "../Host.ts"
 import type { LettaConnection } from "../letta/AppServer.ts"
-import { AgentRetrieveResponse, type AgentState, CreateAgentResponse } from "../letta/Protocol.ts"
-import { AgentUnavailable, unavailable } from "./Errors.ts"
+import { isAgentNotFound } from "../letta/Errors.ts"
+import { AgentRetrieveResponse, type AgentState } from "../letta/Protocol.ts"
+import { agentFailure, AgentNotFound, type AgentUnavailable, unavailable } from "./Errors.ts"
 
 /** The agents the host's Letta Code last used, from its settings files. */
 const HostSettings = Schema.Struct({
@@ -25,18 +24,16 @@ const decodeHostSettings = Schema.decodeUnknownOption(Schema.fromJsonString(Host
 
 const lastAgent = (settings: HostSettings) => Option.toArray(Option.fromNullishOr(settings.lastAgent))
 
-/** A settings file as a JSON object, to update one key and keep the others. */
-const SettingsObjectJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown), { space: 2 })
-const decodeSettingsObject = Schema.decodeUnknownOption(SettingsObjectJson)
-const encodeSettingsObject = Schema.encodeEffect(SettingsObjectJson)
-
 export class AgentResolver extends Context.Service<AgentResolver, {
-  /** The configured agent, or the host's last-used one for `cwd` that still exists. */
-  find(conn: LettaConnection, cwd: string): Effect.Effect<Option.Option<string>>
-  /** Like `find`, but creates an agent when there is none. */
-  findOrCreate(conn: LettaConnection, cwd: string): Effect.Effect<string, AgentUnavailable>
+  /**
+   * The configured agent, or the host's last-used one for `cwd` that still
+   * exists. A failure to look one up fails: it says nothing about the others.
+   */
+  find(conn: LettaConnection, cwd: string): Effect.Effect<Option.Option<string>, AgentUnavailable>
+  /** Like `find`, but fails when there is no agent to use. */
+  resolve(conn: LettaConnection, cwd: string): Effect.Effect<string, AgentNotFound | AgentUnavailable>
   /** The agent's state, which also confirms that it exists. */
-  retrieve(conn: LettaConnection, agentId: string): Effect.Effect<AgentState, AgentUnavailable>
+  retrieve(conn: LettaConnection, agentId: string): Effect.Effect<AgentState, AgentNotFound | AgentUnavailable>
 }>()("lacp/agent/AgentResolver") {
   static readonly layer = Layer.effect(
     AgentResolver,
@@ -46,8 +43,6 @@ export class AgentResolver extends Context.Service<AgentResolver, {
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
       const byCwd = new Map<string, string>()
-      /** One creation at a time, so sessions that start together in a directory share its new agent. */
-      const createLock = yield* Semaphore.make(1)
 
       const readSettings = (file: string) =>
         fs.readFileString(file).pipe(
@@ -83,7 +78,7 @@ export class AgentResolver extends Context.Service<AgentResolver, {
         const found = yield* Effect.findFirst(yield* hostLastAgents(cwd), (agentId) =>
           retrieved(conn, agentId).pipe(
             Effect.map((response) => response.agent !== null),
-            Effect.orElseSucceed(() => false)
+            Effect.catch((error) => isAgentNotFound(error) ? Effect.succeed(false) : Effect.fail(unavailable(error)))
           ))
         if (Option.isSome(found)) {
           byCwd.set(cwd, found.value)
@@ -92,83 +87,26 @@ export class AgentResolver extends Context.Service<AgentResolver, {
         return found
       })
 
-      /** Records `agentId` as the last agent of the project at `cwd`, keeping its other settings. */
-      const remember = Effect.fnUntraced(
-        function*(cwd: string, agentId: string) {
-          const dir = path.join(cwd, ".letta")
-          const file = path.join(dir, "settings.local.json")
-          const existing = yield* fs.readFileString(file).pipe(
-            Effect.asSome,
-            Effect.catchTag(
-              "PlatformError",
-              (error) => error.reason._tag === "NotFound" ? Effect.succeedNone : Effect.fail(error)
-            )
-          )
-          const settings = Option.match(existing, {
-            onNone: () => Option.some({}),
-            onSome: decodeSettingsObject
-          })
-          yield* Option.match(settings, {
-            onNone: () => Effect.logWarning(`Not recording agent ${agentId} in ${file}: it is not a JSON object`),
-            onSome: (settings) =>
-              encodeSettingsObject({ ...settings, lastAgent: agentId }).pipe(
-                Effect.tap(() => fs.makeDirectory(dir, { recursive: true })),
-                Effect.flatMap((text) => fs.writeFileString(file, `${text}\n`))
-              )
-          })
-        },
-        (effect, cwd, agentId) =>
-          Effect.catch(
-            effect,
-            (error) => Effect.logWarning(`Could not record agent ${agentId} for ${cwd}: ${error.message}`)
-          )
-      )
-
-      const create = Effect.fnUntraced(function*(conn: LettaConnection, cwd: string) {
-        const created = yield* conn.call(
-          (request_id) => ({
-            type: "create_agent",
-            request_id,
-            personality: "memo",
-            pin_global: true,
-            model: Option.getOrUndefined(config.model)
-          }),
-          CreateAgentResponse,
-          { timeout: "2 minutes" }
-        ).pipe(Effect.mapError(unavailable))
-        if (created.agent_id === undefined || created.agent_id === null) {
-          return yield* new AgentUnavailable({
-            message: created.error ?? "Letta Code could not create an agent",
-            auth: false
-          })
-        }
-        byCwd.set(cwd, created.agent_id)
-        yield* remember(cwd, created.agent_id)
-        yield* Effect.logWarning(
-          `Created Letta agent ${created.agent_id} for ${cwd}, recorded in its .letta/settings.local.json.`
-        )
-        return created.agent_id
-      })
-
-      const findOrCreate = Effect.fn("AgentResolver.findOrCreate")(function*(conn: LettaConnection, cwd: string) {
+      const resolve = Effect.fn("AgentResolver.resolve")(function*(conn: LettaConnection, cwd: string) {
         const found = yield* find(conn, cwd)
         if (Option.isSome(found)) return found.value
-        return yield* Semaphore.withPermits(createLock, 1)(Effect.suspend(() => {
-          // A caller that held the lock meanwhile may have created this directory's agent.
-          const created = byCwd.get(cwd)
-          return created === undefined ? create(conn, cwd) : Effect.succeed(created)
-        }))
+        return yield* new AgentNotFound({
+          message: `No Letta agent to use for ${cwd}, and lacp does not create agents. ` +
+            "Set LETTA_AGENT_ID or --agent-id, or use an agent with `letta` in this project first."
+        })
       })
 
       const retrieve = Effect.fn("AgentResolver.retrieve")(function*(conn: LettaConnection, agentId: string) {
-        const response = yield* retrieved(conn, agentId).pipe(Effect.mapError(unavailable))
+        // A configured agent that is missing is a mistake to fix there, not a reason to use another.
+        const hint = Option.contains(config.agentId, agentId) ? " (set by --agent-id or LETTA_AGENT_ID)" : ""
+        const response = yield* retrieved(conn, agentId).pipe(Effect.mapError(agentFailure(agentId, hint)))
         if (response.agent === null) {
-          return yield* new AgentUnavailable({ message: `Letta has no agent ${agentId}`, auth: false })
+          return yield* new AgentNotFound({ message: `Letta has no agent ${agentId}${hint}` })
         }
         return response.agent
       })
 
-      return AgentResolver.of({ find, findOrCreate, retrieve })
+      return AgentResolver.of({ find, resolve, retrieve })
     })
   )
 }

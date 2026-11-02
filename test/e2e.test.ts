@@ -8,7 +8,7 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
-import { Effect, FileSystem, Layer, Option, Path, Schedule } from "effect"
+import { Effect, FileSystem, Layer, Option, Path, Predicate, Schedule } from "effect"
 import { spawn, spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import type { LettaRuntime } from "../src/Config.ts"
@@ -55,14 +55,61 @@ const tempDirectory = (prefix: string) =>
     )
   })
 
-const startReal = (lettaRuntime: LettaRuntime = "node", backend: Backend = { _tag: "Deterministic" }) =>
+/** Makes an agent with `letta` itself, as a user would: lacp never creates them. */
+const createAgent = (env: Record<string, string>, cwd: string, backend: Backend) => {
+  const made = spawnSync(letta ?? "letta", [
+    "--backend",
+    "local",
+    "agents",
+    "create",
+    "--name",
+    "lacp-e2e",
+    ...(backend._tag === "Model" ? ["--model", "lmstudio/mock-model"] : [])
+  ], { cwd, env, encoding: "utf8" })
+  assert.strictEqual(made.status, 0, made.stderr)
+  return (JSON.parse(made.stdout) as { readonly id: string }).id
+}
+
+/**
+ * The server on a fresh host. The agent is one made for it and configured, or
+ * made and left for lacp to find in the project's Letta settings, or none.
+ */
+const startReal = (
+  lettaRuntime: LettaRuntime = "node",
+  backend: Backend = { _tag: "Deterministic" },
+  agent: "configured" | "discovered" | "none" | { readonly configured: string } = "configured"
+) =>
   Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem
     const path = yield* Path.Path
     const home = yield* tempDirectory("lacp-e2e-home-")
     const cwd = yield* tempDirectory("lacp-e2e-project-")
+    const env = {
+      // oxlint-disable-next-line effecttsgo/process-env -- the child needs the real PATH
+      PATH: process.env["PATH"] ?? "",
+      HOME: home,
+      DISABLE_AUTOUPDATER: "1",
+      LETTA_CODE_TELEM: "0",
+      DO_NOT_TRACK: "1",
+      LETTA_BASE_URL: "http://127.0.0.1:9",
+      ...(backend._tag === "Model"
+        ? { LMSTUDIO_BASE_URL: backend.lmStudioUrl }
+        : { LETTA_LOCAL_BACKEND_EXECUTOR: "deterministic-reflection" })
+    }
+    const made = agent === "configured" || agent === "discovered" ? createAgent(env, cwd, backend) : undefined
+    if (agent === "discovered") {
+      yield* fs.makeDirectory(path.join(cwd, ".letta"), { recursive: true })
+      yield* fs.writeFileString(path.join(cwd, ".letta", "settings.local.json"), JSON.stringify({ lastAgent: made }))
+    }
+    const agentId = agent === "configured" ?
+      Option.fromUndefinedOr(made)
+      : Predicate.isObject(agent) ?
+      Option.some(agent.configured)
+      : Option.none<string>()
     const client = yield* startWith(realLetta, {
       config: {
         auth: "local",
+        agentId,
         lettaPath: Option.fromUndefinedOr(letta),
         lettaRuntime,
         echoPrompts: true,
@@ -72,23 +119,12 @@ const startReal = (lettaRuntime: LettaRuntime = "node", backend: Backend = { _ta
       host: {
         cwd,
         home,
-        env: {
-          // oxlint-disable-next-line effecttsgo/process-env -- the child needs the real PATH
-          PATH: process.env["PATH"] ?? "",
-          HOME: home,
-          DISABLE_AUTOUPDATER: "1",
-          LETTA_CODE_TELEM: "0",
-          DO_NOT_TRACK: "1",
-          LETTA_BASE_URL: "http://127.0.0.1:9",
-          ...(backend._tag === "Model"
-            ? { LMSTUDIO_BASE_URL: backend.lmStudioUrl }
-            : { LETTA_LOCAL_BACKEND_EXECUTOR: "deterministic-reflection" })
-        },
+        env,
         execPath: process.execPath,
         platform: process.platform
       }
     })
-    return { client, cwd, path }
+    return { client, cwd, path, agent: made }
   })
 
 describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
@@ -198,6 +234,43 @@ describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     180_000
   )
+
+  it.live("refuses a session with no agent to use, and leaves the project alone", () =>
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      const { client, cwd } = yield* startReal("node", { _tag: "Deterministic" }, "none")
+      yield* client.request("initialize", initializeHybrid)
+      const created = yield* client.request("session/new", { cwd })
+      assert.strictEqual(created.error?.code, -32002)
+      assert.include(created.error?.message, "LETTA_AGENT_ID")
+      assert.deepStrictEqual(yield* fs.readDirectory(cwd), [])
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), 180_000)
+
+  it.live("refuses a configured agent Letta Code does not have, without falling back", () =>
+    Effect.gen(function*() {
+      const { client, cwd } = yield* startReal("node", { _tag: "Deterministic" }, {
+        configured: "agent-00000000-0000-4000-8000-000000000000"
+      })
+      yield* client.request("initialize", initializeHybrid)
+      const created = yield* client.request("session/new", { cwd })
+      assert.strictEqual(created.error?.code, -32002)
+      assert.include(created.error?.message, "agent-00000000-0000-4000-8000-000000000000")
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), 180_000)
+
+  it.live("uses the agent found in the project's Letta settings", () =>
+    Effect.gen(function*() {
+      const { client, cwd, agent } = yield* startReal("node", { _tag: "Deterministic" }, "discovered")
+      yield* client.request("initialize", initializeV1)
+      const created = yield* client.request("session/new", { cwd, mcpServers: [] })
+      const reply = yield* client.request("session/prompt", {
+        sessionId: created.result.sessionId,
+        prompt: [{ type: "text", text: "hello" }]
+      })
+      assert.deepStrictEqual(reply.result, { stopReason: "end_turn" })
+      const listed = yield* client.request("session/list", { cwd })
+      assert.strictEqual(listed.result.sessions.length, 1)
+      assert.isDefined(agent)
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), 180_000)
 
   it.live("ACP v1: session/prompt resolves with end_turn", () =>
     Effect.gen(function*() {

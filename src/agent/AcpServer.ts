@@ -42,6 +42,7 @@ const encodeV2Initialize = Schema.encodeEffect(V2.InitializeResponse)
 const toRpcError: (error: AgentError) => RpcError = Match.type<AgentError>().pipe(
   Match.tagsExhaustive({
     SessionNotFound: (e) => RpcError.resourceNotFound(`Session not found: ${e.sessionId}`, { sessionId: e.sessionId }),
+    AgentNotFound: (e) => RpcError.resourceNotFound(e.message),
     AgentUnavailable: (e) => (e.auth ? RpcError.authRequired(e.message) : RpcError.internal(e.message)),
     InvalidConfigValue: (e) => RpcError.invalidParams({ configId: e.configId, value: e.value }),
     PromptRejected: (e) => RpcError.internal(e.message)

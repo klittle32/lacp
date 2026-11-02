@@ -170,10 +170,7 @@ export const initializeV1 = {
   clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true }
 }
 
-/**
- * A new empty directory for a session whose first prompt creates an agent:
- * lacp records the agent in the directory's `.letta/settings.local.json`.
- */
+/** A new empty directory. */
 export const projectDir = () => mkdtempSync(join(tmpdir(), "lacp-project-"))
 
 /** T3 Code's hybrid request: v2 fields plus v1 fields. */

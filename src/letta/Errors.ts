@@ -43,6 +43,16 @@ export type LettaError = LettaNotFound | LettaUnsupported | LettaStartFailed | L
 
 const authPattern = /\b(unauthori[sz]ed|401|api key|not logged in|login|credentials|authenticat)/i
 
+const agentNotFoundPattern = /\bagent\b.*\bnot found\b/i
+
+/**
+ * Does this failure mean Letta does not have the agent? Letta Code reports only
+ * a message (`Agent <id> not found`, on Letta Cloud `Agent with ID <id> not
+ * found`), so anything else, a bare 404 included, counts as a failure to look it up.
+ */
+export const isAgentNotFound = (error: LettaError): boolean =>
+  error._tag === "LettaRequestFailed" && agentNotFoundPattern.test(error.message)
+
 /** Heuristic: does this Letta failure mean the user needs to sign in? */
 export const isAuthFailure = (error: LettaError): boolean =>
   (error._tag === "LettaStartFailed" || error._tag === "LettaRequestFailed") &&

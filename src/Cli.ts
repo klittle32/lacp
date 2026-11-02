@@ -61,7 +61,7 @@ const flags = {
     Flag.String("agent-id"),
     "LETTA_AGENT_ID",
     Config.String,
-    "The Letta agent to talk to (default: the host's last-used agent)."
+    "The existing Letta agent to talk to (default: the host's last-used agent); lacp never creates one."
   ).pipe(Flag.optional),
   model: envFlag(
     Flag.String("model"),

@@ -179,12 +179,15 @@ const installT3 = Effect.fnUntraced(function*(config: SmokeConfig) {
   return { version, binary }
 })
 
+const CreatedAgent = Schema.fromJsonString(Schema.Struct({ id: Schema.String }))
+
 /** T3's settings: this checkout of lacp as a Local ACP command, on Letta's local backend and the scripted model. */
 const t3Settings = (options: {
   readonly config: SmokeConfig
   readonly modelUrl: string
   readonly lettaHome: string
   readonly logFile: string
+  readonly agentId: string
 }) => {
   const passOn = (name: string, value: Option.Option<string>) =>
     Option.match(value, {
@@ -193,6 +196,7 @@ const t3Settings = (options: {
     })
   const environment = {
     LACP_AUTH: "local",
+    LETTA_AGENT_ID: options.agentId,
     LACP_MODEL: "lmstudio/mock-model",
     LACP_PERMISSION_MODE: "unrestricted",
     LACP_LOG_FILE: options.logFile,
@@ -415,7 +419,25 @@ const smoke = Effect.gen(function*() {
     out
   })
   const logFile = path.join(out, "lacp.log")
-  const settings = t3Settings({ config, modelUrl: `http://127.0.0.1:${modelPort}/v1`, lettaHome, logFile })
+  const modelUrl = `http://127.0.0.1:${modelPort}/v1`
+  // lacp never creates agents, so the smoke test makes its own with `letta`, as a user would.
+  const agent = yield* run(
+    "create a Letta agent",
+    Option.getOrElse(config.lettaPath, () => "letta"),
+    ["--backend", "local", "agents", "create", "--name", "lacp-smoke", "--model", "lmstudio/mock-model"],
+    {
+      HOME: lettaHome,
+      LMSTUDIO_BASE_URL: modelUrl,
+      LETTA_BASE_URL: "http://127.0.0.1:9",
+      DISABLE_AUTOUPDATER: "1",
+      LETTA_CODE_TELEM: "0",
+      DO_NOT_TRACK: "1"
+    }
+  )
+  const agentId = yield* Schema.decodeEffect(CreatedAgent)(agent).pipe(
+    Effect.mapError((error) => new SmokeFailed({ step: "create a Letta agent", message: error.message }))
+  )
+  const settings = t3Settings({ config, modelUrl, lettaHome, logFile, agentId: agentId.id })
   yield* fs.writeFileString(path.join(t3Home, "userdata", "settings.json"), JSON.stringify(settings, null, 2))
 
   const t3Env = { T3CODE_HOME: t3Home, T3CODE_TELEMETRY_ENABLED: "false" }

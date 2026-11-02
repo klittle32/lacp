@@ -14,7 +14,7 @@ import {
   RuntimeStartResponse
 } from "../letta/Protocol.ts"
 import { AGENT_NAME, AGENT_TITLE, VERSION } from "../Version.ts"
-import { AgentUnavailable, unavailable } from "./Errors.ts"
+import { agentFailure, AgentUnavailable } from "./Errors.ts"
 
 export interface RuntimeTarget {
   readonly agentId: string
@@ -60,7 +60,7 @@ export const startRuntime = Effect.fnUntraced(
         }),
         RuntimeStartResponse,
         { timeout: "2 minutes" }
-      ).pipe(Effect.mapError(unavailable))
+      ).pipe(Effect.mapError(agentFailure(target.agentId)))
       if (response.runtime === null) {
         return yield* new AgentUnavailable({
           message: response.error ?? "Letta Code did not start a runtime",

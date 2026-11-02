@@ -28,8 +28,8 @@ const writeSettings = (dir: string, file: string, settings: unknown) =>
     yield* fs.writeFileString(path.join(dir, ".letta", file), JSON.stringify(settings))
   })
 
-const created = (fake: Fake.FakeLetta) =>
-  Ref.get(fake.commands).pipe(Effect.map((all) => all.filter((c) => c.type === "create_agent").length))
+/** How Letta Code answers `agent_retrieve` for an agent it does not have. */
+const missing = (agentId: string) => ({ success: false, agent: null, error: `Agent ${agentId} not found` })
 
 describe("AgentResolver", () => {
   it.live("uses the configured agent", () =>
@@ -50,106 +50,80 @@ describe("AgentResolver", () => {
       yield* writeSettings(cwd, "settings.local.json", { lastSession: { agentId: "agent-gone" } })
       yield* writeSettings(home, "settings.json", { lastAgent: "agent-global" })
       assert.deepStrictEqual(yield* resolver.find(fake.connection, cwd), Option.some("agent-global"))
-      assert.strictEqual(yield* created(fake), 0)
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
 
-  it.live("creates an agent only when asked to, once per directory", () =>
+  it.live("skips host agents Letta reports as missing, in the shape Letta Code reports them", () =>
     Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* fake.on("agent_retrieve", (command: any) =>
+        command.agent_id === "agent-gone"
+          ? missing(command.agent_id)
+          : { success: true, agent: { id: command.agent_id } })
+      const { resolver, home, cwd } = yield* setup()
+      yield* writeSettings(cwd, "settings.local.json", { lastAgent: "agent-gone" })
+      yield* writeSettings(home, "settings.json", { lastAgent: "agent-global" })
+      assert.deepStrictEqual(yield* resolver.find(fake.connection, cwd), Option.some("agent-global"))
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
+  it.live("reports a failure to reach Letta instead of moving on to another host agent", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* fake.on("agent_retrieve", () => ({ success: false, agent: null, error: "fetch failed: ECONNREFUSED" }))
+      const { resolver, home, cwd } = yield* setup()
+      yield* writeSettings(cwd, "settings.local.json", { lastAgent: "agent-project" })
+      yield* writeSettings(home, "settings.json", { lastAgent: "agent-global" })
+      const error = yield* resolver.find(fake.connection, cwd).pipe(Effect.flip)
+      assert.strictEqual(error._tag, "AgentUnavailable")
+      assert.isFalse(error.auth)
+      assert.include(error.message, "ECONNREFUSED")
+      const asked = (yield* Ref.get(fake.commands)).filter((c) => c.type === "agent_retrieve")
+      assert.strictEqual(asked.length, 1)
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
+  it.live("marks a failed lookup that needs a sign-in", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* fake.on("agent_retrieve", () => ({ success: false, agent: null, error: "401 Unauthorized" }))
+      const { resolver, home, cwd } = yield* setup()
+      yield* writeSettings(home, "settings.json", { lastAgent: "agent-global" })
+      const error = yield* resolver.resolve(fake.connection, cwd).pipe(Effect.flip)
+      assert.strictEqual(error._tag, "AgentUnavailable")
+      assert.isTrue(error._tag === "AgentUnavailable" && error.auth)
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
+
+  it.live("fails clearly with no usable agent, and writes nothing to the project", () =>
+    Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
       const fake = yield* Fake.make
       const { resolver, cwd } = yield* setup()
       assert.isTrue(Option.isNone(yield* resolver.find(fake.connection, cwd)))
-      assert.strictEqual(yield* resolver.findOrCreate(fake.connection, cwd), Fake.AGENT_ID)
-      assert.strictEqual(yield* resolver.findOrCreate(fake.connection, cwd), Fake.AGENT_ID)
-      assert.deepStrictEqual(yield* resolver.find(fake.connection, cwd), Option.some(Fake.AGENT_ID))
-      assert.strictEqual(yield* created(fake), 1)
+      const error = yield* resolver.resolve(fake.connection, cwd).pipe(Effect.flip)
+      assert.strictEqual(error._tag, "AgentNotFound")
+      assert.include(error.message, "LETTA_AGENT_ID")
+      assert.include(error.message, cwd)
+      assert.deepStrictEqual(yield* fs.readDirectory(cwd), [])
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
 
-  it.live("creates one agent for a directory however many callers ask at once", () =>
-    Effect.gen(function*() {
-      const fake = yield* Fake.make
-      const ids = yield* Ref.make(0)
-      yield* fake.on("create_agent", () =>
-        Ref.updateAndGet(ids, (n) => n + 1).pipe(
-          Effect.delay("20 millis"),
-          Effect.map((n) => ({ success: true, agent_id: `agent-${n}` }))
-        ))
-      const { resolver, cwd } = yield* setup()
-      const agents = yield* Effect.all(
-        [resolver.findOrCreate(fake.connection, cwd), resolver.findOrCreate(fake.connection, cwd)],
-        { concurrency: "unbounded" }
-      )
-      assert.deepStrictEqual(agents, ["agent-1", "agent-1"])
-      assert.strictEqual(yield* created(fake), 1)
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
-
-  it.live("still creates one agent per directory when different directories ask at once", () =>
+  it.live("resolves to the host's agent, remembered for the directory", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const { resolver, cwd } = yield* setup()
-      const fs = yield* FileSystem.FileSystem
-      const other = yield* fs.makeTempDirectoryScoped()
-      yield* Effect.all(
-        [resolver.findOrCreate(fake.connection, cwd), resolver.findOrCreate(fake.connection, other)],
-        { concurrency: "unbounded" }
-      )
-      assert.strictEqual(yield* created(fake), 2)
+      yield* writeSettings(cwd, "settings.local.json", { lastAgent: "agent-project" })
+      assert.strictEqual(yield* resolver.resolve(fake.connection, cwd), "agent-project")
+      assert.strictEqual(yield* resolver.resolve(fake.connection, cwd), "agent-project")
+      const asked = (yield* Ref.get(fake.commands)).filter((c) => c.type === "agent_retrieve")
+      assert.strictEqual(asked.length, 1)
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
 
-  it.live("lets a waiting caller try again when the agent it waited for could not be created", () =>
+  it.live("tells a missing agent from a failure to look it up", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const attempts = yield* Ref.make(0)
-      yield* fake.on("create_agent", () =>
-        Ref.updateAndGet(attempts, (n) => n + 1).pipe(
-          Effect.delay("20 millis"),
-          Effect.map((n) =>
-            n === 1 ? { success: false, error: "no capacity" } : { success: true, agent_id: Fake.AGENT_ID }
-          )
-        ))
-      const { resolver, cwd } = yield* setup()
-      const results = yield* Effect.forEach(
-        [1, 2],
-        () => resolver.findOrCreate(fake.connection, cwd).pipe(Effect.result),
-        { concurrency: "unbounded" }
-      )
-      assert.deepStrictEqual(results.map((r) => r._tag).toSorted(), ["Failure", "Success"])
-      assert.strictEqual(yield* created(fake), 2)
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
-
-  it.live("records a new agent in the project's settings, so later processes keep talking to it", () =>
-    Effect.gen(function*() {
-      const fs = yield* FileSystem.FileSystem
-      const path = yield* Path.Path
-      const fake = yield* Fake.make
-      const { resolver, cwd } = yield* setup()
-      yield* writeSettings(cwd, "settings.local.json", { permissions: { allow: ["Read"] } })
-      assert.strictEqual(yield* resolver.findOrCreate(fake.connection, cwd), Fake.AGENT_ID)
-      const settings = JSON.parse(yield* fs.readFileString(path.join(cwd, ".letta", "settings.local.json")))
-      assert.deepStrictEqual(settings, { permissions: { allow: ["Read"] }, lastAgent: Fake.AGENT_ID })
-
-      // A later process on the same project finds it without creating another.
-      const later = yield* Layer.build(AgentResolver.layer.pipe(
-        Layer.provide(LacpConfig.layerTest({ agentId: Option.none() })),
-        Layer.provide(Host.layerTest({ home: yield* fs.makeTempDirectoryScoped(), cwd })),
-        Layer.provide(NodeServices.layer)
-      ))
-      assert.deepStrictEqual(
-        yield* Context.get(later, AgentResolver).find(fake.connection, cwd),
-        Option.some(Fake.AGENT_ID)
-      )
-      assert.strictEqual(yield* created(fake), 1)
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
-
-  it.live("leaves a project settings file that is not a JSON object alone", () =>
-    Effect.gen(function*() {
-      const fs = yield* FileSystem.FileSystem
-      const path = yield* Path.Path
-      const fake = yield* Fake.make
-      const { resolver, cwd } = yield* setup()
-      const file = path.join(cwd, ".letta", "settings.local.json")
-      yield* fs.makeDirectory(path.join(cwd, ".letta"), { recursive: true })
-      yield* fs.writeFileString(file, "{ not json")
-      assert.strictEqual(yield* resolver.findOrCreate(fake.connection, cwd), Fake.AGENT_ID)
-      assert.strictEqual(yield* fs.readFileString(file), "{ not json")
+      const { resolver } = yield* setup()
+      yield* fake.on("agent_retrieve", (command: any) => missing(command.agent_id))
+      const absent = yield* resolver.retrieve(fake.connection, "agent-x").pipe(Effect.flip)
+      assert.strictEqual(absent._tag, "AgentNotFound")
+      yield* fake.on("agent_retrieve", () => ({ success: false, agent: null, error: "socket hang up" }))
+      const unreachable = yield* resolver.retrieve(fake.connection, "agent-x").pipe(Effect.flip)
+      assert.strictEqual(unreachable._tag, "AgentUnavailable")
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))
 })

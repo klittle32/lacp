@@ -1,16 +1,20 @@
 /**
- * Sessions get their Letta conversation (and, where none is set up, their
- * agent) with their first prompt, so a client that opens sessions only to
- * read their settings, as T3 Code does each time it checks its providers,
- * leaves nothing behind in Letta.
+ * Sessions get their Letta conversation with their first prompt, so a client
+ * that opens sessions only to read their settings, as T3 Code does each time
+ * it checks its providers, leaves nothing behind in Letta. Agents must already
+ * exist: lacp never creates them.
  */
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
-import { Context, Effect, FileSystem, Layer, Option } from "effect"
+import { Context, Effect, FileSystem, Layer, Option, Ref } from "effect"
 import * as SecureRandom from "effect/crypto/SecureRandom"
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import { SessionIds } from "../src/agent/SessionIds.ts"
 import { Host } from "../src/Host.ts"
-import { initializeHybrid, isInput, projectDir, sent, start, text } from "./helpers/AcpClient.ts"
+import { ErrorCode } from "../src/jsonrpc/JsonRpc.ts"
+import { LettaAppServer } from "../src/letta/AppServer.ts"
+import { initializeHybrid, isInput, projectDir, sent, start, startWith, text } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
 
 describe("lazy conversations", () => {
@@ -18,8 +22,7 @@ describe("lazy conversations", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const cwd = projectDir()
-      // No agent is configured or known on this host, so the first prompt creates one too.
-      const client = yield* start(fake, { agentId: Option.none() })
+      const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
       // T3 Code's provider check: open a session, read its settings, close it.
       const probe = yield* client.request("session/new", { cwd })
@@ -33,11 +36,9 @@ describe("lazy conversations", () => {
         created.result.configOptions.find((o: any) => o.configId === "mode").currentValue,
         "unrestricted"
       )
-      assert.strictEqual((yield* sent(fake, "create_agent")).length, 0)
       assert.strictEqual((yield* sent(fake, "runtime_start")).length, 0)
 
       yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
-      assert.strictEqual((yield* sent(fake, "create_agent")).length, 1)
       const [runtimeStart] = yield* sent(fake, "runtime_start")
       assert.deepStrictEqual(runtimeStart.create_conversation, { body: {} })
       assert.strictEqual(runtimeStart.mode, "unrestricted")
@@ -139,6 +140,115 @@ describe("lazy conversations", () => {
     }))
 })
 
+describe("sessions use existing agents only", () => {
+  const missing = (agentId: string) => ({ success: false, agent: null, error: `Agent ${agentId} not found` })
+  const NOT_FOUND = -32002
+
+  /** A server on a host whose Letta settings are `settings`, with no agent configured unless `agentId` says so. */
+  const startOnHost = (
+    fake: Fake.FakeLetta,
+    options: { readonly agentId?: string; readonly lastAgent?: string } = {}
+  ) =>
+    Effect.gen(function*() {
+      const home = projectDir()
+      if (options.lastAgent !== undefined) {
+        mkdirSync(join(home, ".letta"))
+        writeFileSync(join(home, ".letta", "settings.json"), JSON.stringify({ lastAgent: options.lastAgent }))
+      }
+      const client = yield* startWith(LettaAppServer.layerConnection(fake.connection, fake.cli), {
+        config: { agentId: Option.fromUndefinedOr(options.agentId) },
+        host: { home, cwd: "/work" }
+      })
+      yield* client.request("initialize", initializeHybrid)
+      return client
+    })
+
+  it.live("refuses a new session when there is no agent to use, and never asks Letta to create one", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const cwd = projectDir()
+      const client = yield* startOnHost(fake)
+      const created = yield* client.request("session/new", { cwd })
+      assert.strictEqual(created.error?.code, NOT_FOUND)
+      assert.include(created.error?.message, "LETTA_AGENT_ID")
+      assert.deepStrictEqual((yield* Ref.get(fake.commands)).map((c) => c.type).filter((t) => t !== "list_models"), [])
+      assert.deepStrictEqual(readdirSync(cwd), [])
+    }))
+
+  it.live("uses the host's last agent, creating only a conversation with the first prompt", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const client = yield* startOnHost(fake, { lastAgent: "agent-host" })
+      const sessionId = (yield* client.request("session/new", { cwd: projectDir() })).result.sessionId as string
+      yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
+      const [runtimeStart] = yield* sent(fake, "runtime_start")
+      assert.strictEqual(runtimeStart.agent_id, "agent-host")
+      assert.deepStrictEqual(runtimeStart.create_conversation, { body: {} })
+      assert.strictEqual((yield* sent(fake, "create_agent")).length, 0)
+    }))
+
+  it.live("does not fall back from a configured agent Letta does not have", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* fake.on("agent_retrieve", (command: any) =>
+        command.agent_id === "agent-typo"
+          ? missing(command.agent_id)
+          : { success: true, agent: { id: command.agent_id } })
+      const client = yield* startOnHost(fake, { agentId: "agent-typo", lastAgent: "agent-host" })
+      const created = yield* client.request("session/new", { cwd: projectDir() })
+      assert.strictEqual(created.error?.code, NOT_FOUND)
+      assert.include(created.error?.message, "agent-typo")
+      assert.include(created.error?.message, "LETTA_AGENT_ID")
+      assert.deepStrictEqual((yield* sent(fake, "agent_retrieve")).map((c) => c.agent_id), ["agent-typo"])
+      assert.strictEqual((yield* sent(fake, "runtime_start")).length, 0)
+    }))
+
+  it.live("reports a configured agent that cannot be looked up as what it is, not as missing", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const client = yield* startOnHost(fake, { agentId: "agent-mine" })
+      yield* fake.on("agent_retrieve", () => ({ success: false, agent: null, error: "401 Unauthorized" }))
+      const unauthorized = yield* client.request("session/new", { cwd: projectDir() })
+      assert.strictEqual(unauthorized.error?.code, ErrorCode.AuthRequired)
+      yield* fake.on("agent_retrieve", () => ({ success: false, agent: null, error: "fetch failed: ECONNREFUSED" }))
+      const unreachable = yield* client.request("session/new", { cwd: projectDir() })
+      assert.strictEqual(unreachable.error?.code, ErrorCode.InternalError)
+      assert.include(unreachable.error?.message, "ECONNREFUSED")
+    }))
+
+  it.live("reports a failure to reach Letta when looking for the host's agent, not a missing agent", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      yield* fake.on("agent_retrieve", () => ({ success: false, agent: null, error: "fetch failed: ECONNREFUSED" }))
+      const client = yield* startOnHost(fake, { lastAgent: "agent-host" })
+      const created = yield* client.request("session/new", { cwd: projectDir() })
+      assert.strictEqual(created.error?.code, ErrorCode.InternalError)
+    }))
+
+  it.live("fails a prompt whose agent was deleted after the session opened, creating nothing", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const client = yield* start(fake)
+      yield* client.request("initialize", initializeHybrid)
+      const sessionId = (yield* client.request("session/new", { cwd: "/work" })).result.sessionId as string
+      yield* fake.on("runtime_start", (command: any) => ({ ...missing(command.agent_id), runtime: null }))
+      const prompted = yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
+      assert.strictEqual(prompted.error?.code, NOT_FOUND)
+      assert.strictEqual((yield* sent(fake, "create_agent")).length, 0)
+    }))
+
+  it.live("refuses to reopen a session without a conversation when its agent is gone", () =>
+    Effect.gen(function*() {
+      const fake = yield* Fake.make
+      const client = yield* startOnHost(fake, { lastAgent: "agent-host" })
+      const sessionId = (yield* client.request("session/new", { cwd: "/work" })).result.sessionId as string
+      yield* client.request("session/close", { sessionId })
+      yield* fake.on("agent_retrieve", (command: any) => missing(command.agent_id))
+      const resumed = yield* client.request("session/resume", { sessionId, cwd: "/work" })
+      assert.strictEqual(resumed.error?.code, NOT_FOUND)
+    }))
+})
+
 describe("concurrent session requests", () => {
   /** A conversation lookup slow enough for concurrent requests to overlap. */
   const slowRetrieve = (fake: Fake.FakeLetta) =>
@@ -159,25 +269,6 @@ describe("concurrent session requests", () => {
       run_id: "r1",
       seq_id: 1,
       content: [{ type: "text", text: "hi" }]
-    }))
-
-  it.live("gives several prompts' sessions in one directory one new agent", () =>
-    Effect.gen(function*() {
-      const fake = yield* Fake.make
-      yield* fake.on("create_agent", () =>
-        Effect.sleep("20 millis").pipe(Effect.as({ success: true, agent_id: Fake.AGENT_ID })))
-      const cwd = projectDir()
-      const client = yield* start(fake, { agentId: Option.none() })
-      yield* client.request("initialize", initializeHybrid)
-      const first = (yield* client.request("session/new", { cwd })).result.sessionId as string
-      const second = (yield* client.request("session/new", { cwd })).result.sessionId as string
-      yield* Effect.forEach(
-        [first, second],
-        (sessionId) =>
-          client.request("session/prompt", { sessionId, prompt: text("hello") }),
-        { concurrency: "unbounded" }
-      )
-      assert.strictEqual((yield* sent(fake, "create_agent")).length, 1)
     }))
 
   it.live("opens a session resumed twice at once only once", () =>

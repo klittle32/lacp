@@ -57,11 +57,11 @@ src/
 
 ## Sessions and conversations
 
-`session/new` creates nothing in Letta. It reads the agent (if one is configured or found in the host's Letta
-settings) and the model catalog, and opens a _pending_ session with an id from `SessionIds` (`lacp-<uuid>`), the
+`session/new` creates nothing in Letta, and lacp never creates agents. It reads the agent (configured, or found in
+the host's Letta settings) and the model catalog, and fails if there is no agent to use (`AgentNotFound`, as
+opposed to `AgentUnavailable` when Letta cannot be asked). It then opens a _pending_ session with an id from `SessionIds` (`lacp-<uuid>`), the
 agent's model and effort, the configured permission mode (Unrestricted by default) and Letta's built-in slash
-commands. Changing the model, effort or mode only records the choice. The first prompt then creates the agent (if
-there is none yet) and the conversation, with `runtime_start` (`create_conversation`, the session's mode), applies
+commands. Changing the model, effort or mode only records the choice. The first prompt then creates the conversation, with `runtime_start` (`create_conversation`, the session's mode), applies
 the chosen model and effort to the new conversation, and records the pair in `SessionIds`. The runtime's device
 status then supplies the session's real commands. A session lock serializes this with config changes made
 meanwhile.

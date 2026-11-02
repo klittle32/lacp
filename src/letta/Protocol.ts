@@ -166,13 +166,6 @@ export const Command = Schema.Union([
   }),
   Schema.Struct({ type: Schema.Literal("agent_retrieve"), request_id: Schema.String, agent_id: Schema.String }),
   Schema.Struct({
-    type: Schema.Literal("create_agent"),
-    request_id: Schema.String,
-    personality: Schema.Literals(["memo", "tutorial", "blank", "linus", "kawaii"]),
-    model: opt(Schema.String),
-    pin_global: opt(Schema.Boolean)
-  }),
-  Schema.Struct({
     type: Schema.Literal("execute_command"),
     request_id: Schema.String,
     command_id: Schema.String,
@@ -304,12 +297,6 @@ export const ConversationMessagesListResponse = response({
 })
 
 export const AgentRetrieveResponse = response({ agent: Schema.NullOr(AgentState) })
-
-export const CreateAgentResponse = response({
-  agent_id: optNull(Schema.String),
-  name: optNull(Schema.String),
-  model: optNull(Schema.String)
-})
 
 export const ExecuteCommandResponse = response({ output: opt(Schema.String) })
 

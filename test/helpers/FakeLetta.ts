@@ -198,7 +198,6 @@ export const make = Effect.gen(function*() {
         llm_config: { model: "claude", context_window: 200_000 }
       }
     }),
-    create_agent: () => ({ success: true, agent_id: AGENT_ID }),
     conversation_retrieve: (command) => {
       const id = (command as Extract<Command, { type: "conversation_retrieve" }>).conversation_id
       return id === "missing"
@@ -260,8 +259,8 @@ export const make = Effect.gen(function*() {
         const raw = Effect.isEffect(answer) ? yield* answer : answer
         // runtime_start replays state before responding (wait_for_replay).
         if (command.type === "runtime_start") {
-          const started = raw as { runtime: { conversation_id: string } }
-          yield* emit(deviceStatus(started.runtime.conversation_id))
+          const started = raw as { runtime: { conversation_id: string } | null }
+          if (started.runtime !== null) yield* emit(deviceStatus(started.runtime.conversation_id))
         }
         const decoded = yield* Schema.decodeUnknownEffect(response)(raw).pipe(
           Effect.mapError((e) => new LettaRequestFailed({ command: command.type, message: e.message }))
