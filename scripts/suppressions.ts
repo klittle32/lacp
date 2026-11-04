@@ -1,14 +1,7 @@
-/**
- * Suppression comments must say why they exist. Inline comments also may not
- * silence the Effect-native rules: those boundaries belong in `.oxlintrc.json`.
- */
-
-// A directive counts only at the start of a comment line, so mentioning one in prose is fine.
-const DIRECTIVE =
+const COMMENT_LINE_DIRECTIVE =
   /(?:^|\n)\s*(?:\*\s*)?(oxlint-disable(?:-next-line|-line)?|eslint-disable(?:-next-line|-line)?|@effect-diagnostics(?:-next-line)?|@ts-expect-error|@ts-ignore|@ts-nocheck)/g
 
-/** Oxlint rule ids that must be scoped in `.oxlintrc.json`, not silenced inline. */
-const GUARDED_RULES = [
+const RULES_FORBIDDEN_INLINE = [
   "effecttsgo/async-function",
   "effecttsgo/crypto-random-uuid-in-effect",
   "effecttsgo/crypto-random-uuid",
@@ -32,8 +25,7 @@ const GUARDED_RULES = [
   "effecttsgo/try-catch-in-effect-gen"
 ]
 
-/** Language-service diagnostic names for the same rules. */
-const GUARDED_DIAGNOSTICS = [
+const DIAGNOSTICS_FORBIDDEN_INLINE = [
   "asyncFunction",
   "cryptoRandomUUIDInEffect",
   "cryptoRandomUUID",
@@ -83,7 +75,6 @@ const REGEX_KEYWORDS = new Set([
   "instanceof"
 ])
 
-/** Comment texts. A slash after `=` is a regex, and `${}` returns to code. */
 export const commentSpans = (source: string): Array<CommentSpan> => {
   const found: Array<CommentSpan> = []
   let index = 0
@@ -221,15 +212,14 @@ export const commentSpans = (source: string): Array<CommentSpan> => {
 
 const hasReason = (text: string) => /[A-Za-z]{3,}/.test(text)
 
-const mentionsGuarded = (rules: string) =>
-  GUARDED_RULES.some((rule) => rules.includes(rule)) ||
-  GUARDED_DIAGNOSTICS.some((name) => new RegExp(`\\b${name}\\b`).test(rules))
+const namesForbiddenInlineRule = (rules: string) =>
+  RULES_FORBIDDEN_INLINE.some((rule) => rules.includes(rule)) ||
+  DIAGNOSTICS_FORBIDDEN_INLINE.some((name) => new RegExp(`\\b${name}\\b`).test(rules))
 
-/** Problems in `source`, using 1-based line numbers. */
 export const suppressionProblems = (source: string): Array<SuppressionProblem> => {
   const problems: Array<SuppressionProblem> = []
   for (const comment of commentSpans(source)) {
-    for (const match of comment.text.matchAll(DIRECTIVE)) {
+    for (const match of comment.text.matchAll(COMMENT_LINE_DIRECTIVE)) {
       const directive = match[1] ?? ""
       const body = comment.text.slice((match.index ?? 0) + match[0].length)
       const typescriptDirective = directive.startsWith("@ts-")
@@ -239,7 +229,7 @@ export const suppressionProblems = (source: string): Array<SuppressionProblem> =
       const namedRules = rules.trim()
       const blanket = namedRules === "" || namedRules === "*" || /(^|[\s,])\*(?::[A-Za-z]+)?\b/.test(namedRules)
 
-      if (!typescriptDirective && (blanket || mentionsGuarded(rules))) {
+      if (!typescriptDirective && (blanket || namesForbiddenInlineRule(rules))) {
         problems.push({
           line: comment.line,
           message:

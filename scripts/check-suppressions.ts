@@ -1,11 +1,10 @@
-// Fails when a suppression comment has no reason, or silences an Effect-native rule inline.
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Console, Effect, FileSystem, Path, Schema } from "effect"
-import { slipProblems } from "./slips.ts"
+import { bannedEffectProblems } from "./banned-effect.ts"
 import { suppressionProblems } from "./suppressions.ts"
 
-class UnreasonedSuppression extends Schema.TaggedError<UnreasonedSuppression, { readonly brand: unique symbol }>()(
-  "UnreasonedSuppression",
+class EffectGateFailed extends Schema.TaggedError<EffectGateFailed, { readonly brand: unique symbol }>()(
+  "EffectGateFailed",
   { count: Schema.Finite }
 ) {}
 
@@ -43,14 +42,14 @@ const program = Effect.gen(function*() {
     const fixtureScript = relative.startsWith("test/fixtures/") && !relative.endsWith(".ts") &&
       !relative.endsWith(".tsx")
     if (!fixtureScript) {
-      for (const problem of slipProblems(text, relative)) {
+      for (const problem of bannedEffectProblems(text, relative)) {
         problems.push(`${relative}:${problem.line}: ${problem.message}`)
       }
     }
   }
   if (problems.length > 0) {
     yield* Console.error(problems.join("\n"))
-    return yield* new UnreasonedSuppression({ count: problems.length })
+    return yield* new EffectGateFailed({ count: problems.length })
   }
   return undefined
 }).pipe(Effect.provide(NodeServices.layer))

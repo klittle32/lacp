@@ -1,7 +1,7 @@
 import { assert, describe, it } from "@effect/vitest"
-import { slipProblems } from "../scripts/slips.ts"
+import { bannedEffectProblems } from "../scripts/banned-effect.ts"
 
-const problemsFor = (source: string, file = "src/example.ts") => slipProblems(source, file)
+const problemsFor = (source: string, file = "src/example.ts") => bannedEffectProblems(source, file)
 
 describe("banned Effect slips", () => {
   it("reports aliased, bracket, and globalThis spellings", () => {

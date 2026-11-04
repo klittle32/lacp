@@ -1,4 +1,4 @@
-export interface SlipProblem {
+export interface BannedEffectProblem {
   readonly line: number
   readonly message: string
 }
@@ -242,10 +242,9 @@ const tokenize = (source: string): Array<Token> => {
   return tokens
 }
 
-/** Reports Effect-banned operations, including ones reached through a local alias. */
-export const slipProblems = (sourceText: string, file: string): ReadonlyArray<SlipProblem> => {
+export const bannedEffectProblems = (sourceText: string, file: string): ReadonlyArray<BannedEffectProblem> => {
   const tokens = tokenize(sourceText)
-  const problems: Array<SlipProblem> = []
+  const problems: Array<BannedEffectProblem> = []
   const seen = new Set<string>()
   let cursor = 0
 

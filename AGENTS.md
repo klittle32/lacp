@@ -63,11 +63,11 @@ never `console.*`.
 `src/main.ts` captures the `process.env` object once into `Host`. That is the process boundary. Everywhere else,
 read configuration with `Config` or the `Host` service.
 
-`scripts/slips.ts` follows local aliases, bracket access, `import()`, `createRequire`, and `getBuiltinModule`. A direct
+`scripts/banned-effect.ts` follows local aliases, bracket access, `import()`, `createRequire`, and `getBuiltinModule`. A direct
 `process.env` property in `src/main.ts` is the one allowed capture. `test/fixtures/*.mjs` stays out of the gate
 because those files are the fake Letta and MCP processes. A `.ts` file in that directory is checked.
 
-Two files may import one Node module the Effect rule cannot replace. `scripts/slips.ts` rejects any other banned
+Two files may import one Node module the Effect rule cannot replace. `scripts/banned-effect.ts` rejects any other banned
 module in those files, and the oxlint override is only what lets the allowed import through:
 
 - `test/helpers/E2eProcess.ts` may import `node:child_process` to spawn `letta` and the scripted model.
