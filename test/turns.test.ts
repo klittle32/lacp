@@ -4,7 +4,7 @@
  * sessions reopened elsewhere.
  */
 import { assert, describe, it } from "@effect/vitest"
-import { Duration, Effect, Fiber, Ref } from "effect"
+import { Duration, Effect, Fiber, Ref, Schema } from "effect"
 import { idle, initializeHybrid, initializeV1, isInput, start, text } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
 
@@ -24,12 +24,14 @@ describe("turns", () => {
 
       const reply = yield* client.next((m) => m.id === "second").pipe(Effect.forkChild)
       yield* Effect.sleep("20 millis")
-      yield* client.raw(JSON.stringify({
-        jsonrpc: "2.0",
-        id: "second",
-        method: "session/prompt",
-        params: { sessionId, prompt: text("second") }
-      }))
+      yield* client.raw(
+        yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))({
+          jsonrpc: "2.0",
+          id: "second",
+          method: "session/prompt",
+          params: { sessionId, prompt: text("second") }
+        })
+      )
       yield* Effect.sleep("20 millis")
       yield* client.notify("$/cancel_request", { requestId: "second" })
       assert.strictEqual((yield* Fiber.join(reply)).error?.code, -32800)

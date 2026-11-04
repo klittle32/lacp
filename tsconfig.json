@@ -46,7 +46,6 @@
         ],
         "diagnosticSeverity": {
           "catchUnfailableEffect": "warning",
-          "preferSchemaOverJson": "warning",
           "schemaSync": "warning",
           "strictBooleanExpressions": "warning"
         },
@@ -54,7 +53,7 @@
           {
             "include": ["test/**/*.ts", "scripts/**/*.ts"],
             "options": {
-              "diagnosticSeverity": { "preferSchemaOverJson": "off", "schemaSync": "off" }
+              "diagnosticSeverity": { "schemaSync": "off" }
             }
           }
         ]

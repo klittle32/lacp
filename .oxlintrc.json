@@ -16,7 +16,33 @@
     "suspicious": "error",
     "perf": "error"
   },
+  "options": {
+    "typeAware": true,
+    "denyWarnings": true,
+    "reportUnusedDisableDirectives": "error"
+  },
   "rules": {
+    "effecttsgo/async-function": "error",
+    "effecttsgo/crypto-random-uuid": "error",
+    "effecttsgo/crypto-random-uuid-in-effect": "error",
+    "effecttsgo/extends-native-error": "error",
+    "effecttsgo/global-console": "error",
+    "effecttsgo/global-console-in-effect": "error",
+    "effecttsgo/global-date": "error",
+    "effecttsgo/global-date-in-effect": "error",
+    "effecttsgo/global-fetch": "error",
+    "effecttsgo/global-fetch-in-effect": "error",
+    "effecttsgo/global-json": "error",
+    "effecttsgo/global-json-in-effect": "error",
+    "effecttsgo/global-random": "error",
+    "effecttsgo/global-random-in-effect": "error",
+    "effecttsgo/global-timers": "error",
+    "effecttsgo/global-timers-in-effect": "error",
+    "effecttsgo/new-promise": "error",
+    "effecttsgo/node-builtin-import": "error",
+    "effecttsgo/process-env": "error",
+    "effecttsgo/process-env-in-effect": "error",
+    "effecttsgo/try-catch-in-effect-gen": "error",
     "typescript/consistent-type-imports": [
       "error",
       {
@@ -48,7 +74,7 @@
   },
   "ignorePatterns": [
     "dist",
-    "test/fixtures",
+    "test/fixtures/**/*.mjs",
     "node_modules"
   ],
   "overrides": [
@@ -58,6 +84,22 @@
       ],
       "rules": {
         "effecttsgo/strict-effect-provide": "off"
+      }
+    },
+    {
+      "files": [
+        "test/helpers/E2eProcess.ts"
+      ],
+      "rules": {
+        "effecttsgo/node-builtin-import": "off"
+      }
+    },
+    {
+      "files": [
+        "test/helpers/McpHttpServer.ts"
+      ],
+      "rules": {
+        "effecttsgo/node-builtin-import": "off"
       }
     },
     {

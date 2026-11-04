@@ -1,6 +1,6 @@
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
-import { Effect, FileSystem, Layer, Option, Path, Result } from "effect"
+import { Effect, FileSystem, Layer, Option, Path, Result, Schema } from "effect"
 import { LacpConfig } from "../src/Config.ts"
 import { Host, type HostShape } from "../src/Host.ts"
 import { chooseRuntime, isAtLeast, LettaExecutable, parseVersion, spawnable } from "../src/letta/Executable.ts"
@@ -257,11 +257,12 @@ describe("Login.inSettingsFile", () => {
       const fs = yield* FileSystem.FileSystem
       const home = yield* fs.makeTempDirectoryScoped()
       yield* fs.makeDirectory(`${home}/.letta`)
+      const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))
       const withSettings = (text: string) =>
         fs.writeFileString(`${home}/.letta/settings.json`, text).pipe(Effect.andThen(Login.inSettingsFile(home)))
-      assert.isTrue(yield* withSettings(JSON.stringify({ refreshToken: "rt", lastAgent: "agent-1" })))
-      assert.isTrue(yield* withSettings(JSON.stringify({ env: { LETTA_API_KEY: "sk-let" } })))
-      assert.isFalse(yield* withSettings(JSON.stringify({ refreshToken: "", env: { OTHER: "x" } })))
+      assert.isTrue(yield* withSettings(yield* encodeJson({ refreshToken: "rt", lastAgent: "agent-1" })))
+      assert.isTrue(yield* withSettings(yield* encodeJson({ env: { LETTA_API_KEY: "sk-let" } })))
+      assert.isFalse(yield* withSettings(yield* encodeJson({ refreshToken: "", env: { OTHER: "x" } })))
       assert.isFalse(yield* withSettings("not json"))
       assert.isFalse(yield* Login.inSettingsFile("/nonexistent-home"))
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)))

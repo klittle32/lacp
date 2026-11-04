@@ -69,7 +69,7 @@ const setup = Effect.gen(function*() {
     Layer.provide(LettaAppServer.layerConnection(fake.connection, fake.cli)),
     Layer.provide(client),
     Layer.provide(LacpConfig.layerTest({ agentId: Option.some(Fake.AGENT_ID) })),
-    Layer.provide(Host.layerTest({ home: projectDir(), cwd: "/work" })),
+    Layer.provide(Host.layerTest({ home: yield* projectDir, cwd: "/work" })),
     Layer.provide(NodePath.layerPosix),
     Layer.provide(NodeServices.layer),
     Layer.provide(SecureRandom.layerWebCrypto)

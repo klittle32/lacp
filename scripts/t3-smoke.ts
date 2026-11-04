@@ -267,21 +267,23 @@ const waitForThread = (page: Page, step: string, done: (text: string) => boolean
   )
 
 /** Pairs the browser with the server. */
-const pair = (page: Page, pairingUrl: string) =>
-  ui("pair with T3 Code", async () => {
-    await page.goto(pairingUrl)
-    await page.waitForURL((url) => !url.pathname.startsWith("/pair"), { timeout: 60_000 })
-  })
+const pair = (page: Page, pairingUrl: string) => {
+  const step = "pair with T3 Code"
+  return ui(step, () => page.goto(pairingUrl)).pipe(
+    Effect.andThen(ui(step, () => page.waitForURL((url) => !url.pathname.startsWith("/pair"), { timeout: 60_000 })))
+  )
+}
 
 /** One step of T3's first-run setup: skip importing projects, or continue. */
-const setupStep = (page: Page) =>
-  ui("finish T3's first-run setup", async () => {
+const setupStep = (page: Page) => {
+  const step = "finish T3's first-run setup"
+  return Effect.gen(function*() {
     const skipImport = page.getByRole("button", { name: "Do not import projects" })
-    const next = (await skipImport.isVisible())
-      ? skipImport
-      : page.getByRole("button", { name: "Continue", exact: true }).first()
-    await next.click()
+    const visible = yield* ui(step, () => skipImport.isVisible())
+    const next = visible ? skipImport : page.getByRole("button", { name: "Continue", exact: true }).first()
+    yield* ui(step, () => next.click())
   })
+}
 
 /** Steps through T3's first-run setup until it is done. */
 const finishSetup = (page: Page) =>
@@ -296,20 +298,27 @@ const openT3 = (page: Page, base: string) =>
   ui("open T3 Code", () => page.goto(base)).pipe(Effect.retry({ times: 3, schedule: Schedule.spaced("1 second") }))
 
 /** Opens a new thread on the lacp provider with the scripted model and sends `prompt`. */
-const startThread = (page: Page, base: string, prompt: string) =>
-  openT3(page, base).pipe(Effect.andThen(ui("start a thread on lacp with the scripted model", async () => {
+const startThread = (page: Page, base: string, prompt: string) => {
+  const step = "start a thread on lacp with the scripted model"
+  return openT3(page, base).pipe(Effect.andThen(Effect.gen(function*() {
     const newThread = page.locator("[aria-label=\"New thread\"]")
-    if ((await newThread.count()) > 0) await newThread.first().click()
-    await page.locator("[data-chat-provider-model-picker]").first().click()
-    await page.locator(`[aria-label^="${PROVIDER}"]`).first().click()
-    await page.getByPlaceholder("Search models...").fill("mock-model")
+    if ((yield* ui(step, () => newThread.count())) > 0) yield* ui(step, () => newThread.first().click())
+    yield* ui(step, () => page.locator("[data-chat-provider-model-picker]").first().click())
+    yield* ui(step, () => page.locator(`[aria-label^="${PROVIDER}"]`).first().click())
+    yield* ui(step, () => page.getByPlaceholder("Search models...").fill("mock-model"))
     // lacp starts Letta Code before T3 lists its models.
-    await page.locator("[role=option]").filter({ hasText: "mock-model" }).filter({ hasText: PROVIDER }).first()
-      .click({ timeout: 120_000 })
-    await page.locator("[data-testid=\"composer-editor\"]").first().click()
-    await page.keyboard.type(prompt)
-    await page.keyboard.press("Enter")
+    yield* ui(
+      step,
+      () =>
+        page.locator("[role=option]").filter({ hasText: "mock-model" }).filter({ hasText: PROVIDER }).first().click({
+          timeout: 120_000
+        })
+    )
+    yield* ui(step, () => page.locator("[data-testid=\"composer-editor\"]").first().click())
+    yield* ui(step, () => page.keyboard.type(prompt))
+    yield* ui(step, () => page.keyboard.press("Enter"))
   })))
+}
 
 const seconds = (since: number) => Clock.currentTimeMillis.pipe(Effect.map((now) => (now - since) / 1000))
 
@@ -438,7 +447,10 @@ const smoke = Effect.gen(function*() {
     Effect.mapError((error) => new SmokeFailed({ step: "create a Letta agent", message: error.message }))
   )
   const settings = t3Settings({ config, modelUrl, lettaHome, logFile, agentId: agentId.id })
-  yield* fs.writeFileString(path.join(t3Home, "userdata", "settings.json"), JSON.stringify(settings, null, 2))
+  yield* fs.writeFileString(
+    path.join(t3Home, "userdata", "settings.json"),
+    yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown, { space: 2 }))(settings)
+  )
 
   const t3Env = { T3CODE_HOME: t3Home, T3CODE_TELEMETRY_ENABLED: "false" }
   const pairingUrl = yield* startService({

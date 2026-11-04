@@ -99,7 +99,7 @@ describe("effort", () => {
   it.live("offers effort before the first prompt creates the session's conversation", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const cwd = projectDir()
+      const cwd = yield* projectDir
       const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
       const created = yield* client.request("session/new", { cwd })
@@ -116,7 +116,7 @@ describe("effort", () => {
   it.live("gives a new conversation the effort shown before it existed", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const cwd = projectDir()
+      const cwd = yield* projectDir
       // Letta creates the conversation without reasoning; the session showed medium.
       yield* fake.on("runtime_start", (command: any) => ({
         success: true,

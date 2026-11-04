@@ -8,34 +8,98 @@ Guidance for AI coding agents working in this repository.
 program. It drives the host's own `letta` install as an App Server and serves ACP v1 and v2 over stdio. Read
 `README.md` for the user-facing picture and `docs/architecture.md` for the module map.
 
+## Learning more about Effect
+
+This repository uses the Effect Typescript library.
+
+Before writing any Effect code, first read `node_modules/effect/AGENTS.md` **completely**, and follow the links
+in the file when required.
+
+If you need to learn more about particular Effect APIs and concepts that the guide doesn't cover, search through
+the source code in `node_modules/effect/src`. Prefer the installed `.d.ts` files and `node_modules/effect/ai-docs/src/`
+over memory or web pages — Effect v4 renamed much of v3.
+
+Project skills installed from `Effect-TS/skills` live in `.agents/skills/` (`effect-ts`, and `effect-v3-to-v4` for a
+v3 migration only). Refresh them with `npx skills add Effect-TS/skills -y --skill '*' --copy`.
+
 ## Effect
 
-- The authoritative Effect documentation is shipped with the package: read `node_modules/effect/AGENTS.md` and the
-  examples in `node_modules/effect/ai-docs/src/`. Prefer them (and the installed `.d.ts` files) over memory or web
-  pages — Effect v4 renamed much of v3.
-- v4 names: `Context.Service` (not `Context.Tag`/`Effect.Service`), `Layer.effect` (also for scoped layers),
-  `Schema.TaggedError<Self, { readonly brand: unique symbol }>()(...)`, `Effect.catch`, `Effect.forkChild`,
-  `Result`, modules `effect/cli`, `effect/process`, `effect/socket`, `effect/encoding` (no `effect/unstable/*`).
-- Services are classes with `static readonly layer`; build implementations with `Self.of({...})` and methods with
-  `Effect.fn("Service.method")`. Provide layers once, at the entry point (`src/Cli.ts`).
-- Model and decode every IO boundary with `Schema` (ACP messages, App Server frames, settings files). Use
-  `Predicate`/`Match`/`Option`, not hand-written guards.
-- **stdout is the ACP channel.** Never write to it except through `Transport`. Use `Effect.log*` (routed to stderr);
-  never `console.*`.
+Write Effect. Plain TypeScript side effects are lint errors (`npm run lint` fails on them, including warnings).
+
+| Plain TypeScript                                                         | Effect v4                                                                                                                       |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `try` / `catch`                                                          | `Effect.try`, `Effect.tryPromise`, `Effect.catch`, `Effect.catchTag`                                                            |
+| `throw`                                                                  | `yield*` a `Schema.TaggedError`, or `Effect.fail`. `Effect.die` is a defect                                                     |
+| `async` / `Promise`                                                      | `Effect.gen`, `Effect.fn` / `Effect.fnUntraced`, `Effect.promise`, `Effect.tryPromise`                                          |
+| `fetch`                                                                  | `HttpClient` from `effect/http`, provided with `FetchHttpClient.layer`                                                          |
+| `console.*`                                                              | `Effect.log`, `Effect.logInfo`, `Effect.logWarning`, `Effect.logError`, `Effect.logDebug`, `Effect.logTrace`, `Effect.logFatal` |
+| `process.env`                                                            | `Config.String`, `Config.option`, `Config.all`, `Config.withDefault`                                                            |
+| `setTimeout` / `setInterval`                                             | `Effect.sleep`, `Schedule`                                                                                                      |
+| `Date.now()` / `new Date()`                                              | `Clock.currentTimeMillis`, `DateTime.now`, `DateTime.nowInCurrentZone`                                                          |
+| `Math.random()`                                                          | `Random.next`, `Random.nextInt`, `Random.nextIntBetween`                                                                        |
+| `crypto.randomUUID()`                                                    | `SecureRandom` from `effect/crypto` (`uuidV4`)                                                                                  |
+| `JSON.parse` / `JSON.stringify`                                          | `Schema.fromJsonString`, `Schema.decodeUnknownEffect` / `Schema.decodeSync`, `Schema.encodeEffect`, `Schema.toCodecJson`        |
+| `node:fs`, `node:path`, `node:child_process`, `node:crypto`, `node:http` | `FileSystem`, `Path`, `ChildProcess` / `ChildProcessSpawner` (`effect/process`), `effect/crypto`, `HttpClient`                  |
+
+Oxlint enforces these as errors under the `effecttsgo/` rules `global-fetch`, `global-console`, `global-date`,
+`global-random`, `global-timers`, `global-json`, `process-env`, `node-builtin-import`, `async-function`,
+`new-promise`, `crypto-random-uuid`, `extends-native-error`, and `try-catch-in-effect-gen`, including each
+`*-in-effect` pair. Do not copy the same bans into `tsconfig.json`; `npm run check` already runs the language
+service, and `npm run diagnostics` repeats that pass. It does not see these oxlint rules.
+
+Other v4 names: `Context.Service` (not `Context.Tag` / `Effect.Service`), `Layer.effect` (also for scoped layers),
+`Schema.TaggedError<Self, { readonly brand: unique symbol }>()(...)`, `Effect.catch`, `Effect.forkChild`,
+`Result`, modules `effect/cli`, `effect/process`, `effect/socket`, `effect/encoding` (no `effect/unstable/*`).
+
+Services are classes with `static readonly layer`; build implementations with `Self.of({...})` and methods with
+`Effect.fn("Service.method")`. Provide layers once, at the entry point (`src/Cli.ts`).
+
+Model and decode every IO boundary with `Schema` (ACP messages, App Server frames, settings files). Use
+`Predicate` / `Match` / `Option`, not hand-written guards.
+
+**stdout is the ACP channel.** Never write to it except through `Transport`. Use `Effect.log*` (routed to stderr);
+never `console.*`.
+
+`src/main.ts` captures the `process.env` object once into `Host`. That is the process boundary. Everywhere else,
+read configuration with `Config` or the `Host` service.
+
+`scripts/banned-effect.ts` follows local aliases, bracket access, `import()`, `createRequire`, and `getBuiltinModule`. A direct
+`process.env` property in `src/main.ts` is the one allowed capture. `test/fixtures/*.mjs` stays out of the gate
+because those files are the fake Letta and MCP processes. A `.ts` file in that directory is checked.
+
+Two files may import one Node module the Effect rule cannot replace. `scripts/banned-effect.ts` rejects any other banned
+module in those files, and the oxlint override is only what lets the allowed import through:
+
+- `test/helpers/E2eProcess.ts` may import `node:child_process` to spawn `letta` and the scripted model.
+- `test/helpers/McpHttpServer.ts` may import `node:http` to serve the MCP fixture. `HttpClient` does not serve.
+
+Do not add another allowed module without a reason written next to it in this file.
 
 ## Commands
 
 ```sh
 npm install        # also patches tsc with the Effect Language Service (effect-tsgo patch)
 npm run check      # tsc (TypeScript 7) with Effect diagnostics
-npm run lint       # oxlint (Effect presets) + dprint check
+npm run lint       # oxlint (Effect rules, warnings are errors) + dprint + the Effect gate
 npm run lint-fix   # oxlint --fix + dprint fmt
 npm test           # vitest
+npm run verify     # check, lint, test, and build
 LACP_E2E_LETTA="$(command -v letta)" npm test   # also run end-to-end tests against a real Letta Code
 npm run smoke:t3   # drive this checkout in a real T3 Code nightly (Chrome; see scripts/t3-smoke.ts)
 ```
 
-Run `npm run check && npm run lint && npm test` before committing.
+A task is not done until `npm run verify` passes.
+
+## Suppressions
+
+Do not add `oxlint-disable`, `eslint-disable`, `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`, or
+`@effect-diagnostics` comments without a reason on that same comment, and never to silence the Effect-native rules
+above. A boundary is a scoped `.oxlintrc.json` override, with the reason recorded in this file.
+
+- Oxlint, ESLint, and `@effect-diagnostics` directives need `--` and a reason (`// oxlint-disable-next-line no-console -- scratch log`).
+- `@ts-expect-error`, `@ts-ignore`, and `@ts-nocheck` need a reason after the directive (`// @ts-expect-error the fixture is partial`).
+
+`npm run lint` runs `scripts/check-suppressions.ts`, which fails the build when a comment breaks these rules.
 
 ## Conventions
 
