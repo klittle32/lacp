@@ -26,6 +26,34 @@ describe("suppression comments", () => {
     assert.include(problems[0]?.message, "scoped .oxlintrc.json override")
   })
 
+  it("rejects a blanket disable and a wildcard diagnostic switch", () => {
+    const samples = [
+      "// oxlint-disable-next-line -- the host shell sets HOME\nexport const home = () => process.env[\"HOME\"]\n",
+      "/* oxlint-disable -- legacy module, rewrite later */\nexport const home = () => process.env[\"HOME\"]\n",
+      "// eslint-disable-next-line -- quick debugging aid\nexport const debug = (message: string) => console.log(message)\n",
+      "// @effect-diagnostics-next-line *:off -- the host shell sets HOME\nexport const home = () => process.env[\"HOME\"]\n",
+      "// @effect-diagnostics *:off -- generated module\nexport const now = () => Date.now()\n"
+    ]
+    for (const sample of samples) {
+      const problems = suppressionProblems(sample)
+      assert.strictEqual(problems.length, 1, sample)
+      assert.include(problems[0]?.message, "silences an Effect-native rule")
+    }
+  })
+
+  it("sees a disable comment after a regex quote and inside a template", () => {
+    const samples = [
+      "export const quoted = /\"/\n// oxlint-disable-next-line effecttsgo/process-env -- the host shell sets HOME\nexport const home = () => process.env[\"HOME\"]\n",
+      "const marker = /'/\n// oxlint-disable-next-line effecttsgo/global-fetch -- fixture client\nexport const load = () => fetch(\"https://example.invalid\")\n",
+      "export const home = () => `${\n// oxlint-disable-next-line effecttsgo/process-env -- the host shell sets HOME\nprocess.env[\"HOME\"]}`\n"
+    ]
+    for (const sample of samples) {
+      const problems = suppressionProblems(sample)
+      assert.strictEqual(problems.length, 1, sample)
+      assert.include(problems[0]?.message, "silences an Effect-native rule")
+    }
+  })
+
   it("ignores the same words inside strings and prose", () => {
     assert.deepStrictEqual(
       suppressionProblems("export const sample = \"// oxlint-disable-next-line no-console\""),
