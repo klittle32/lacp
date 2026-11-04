@@ -63,20 +63,24 @@ never `console.*`.
 `src/main.ts` captures the `process.env` object once into `Host`. That is the process boundary. Everywhere else,
 read configuration with `Config` or the `Host` service.
 
-Two files keep a Node API because the oxlint replacement does not do the job. The overrides are in `.oxlintrc.json`:
+`scripts/slips.ts` follows local aliases, bracket access, `import()`, `createRequire`, and `getBuiltinModule`. A direct
+`process.env` property in `src/main.ts` is the one allowed capture. `test/fixtures/*.mjs` stays out of the gate
+because those files are the fake Letta and MCP processes. A `.ts` file in that directory is checked.
 
-- `test/helpers/E2eProcess.ts` spawns the real `letta` binary and the scripted model with `node:child_process`.
-- `test/helpers/McpHttpServer.ts` is an in-process HTTP server. The `node:http` rule points at `HttpClient`, which
-  does not serve.
+Two files may import one Node module the Effect rule cannot replace. `scripts/slips.ts` rejects any other banned
+module in those files, and the oxlint override is only what lets the allowed import through:
 
-Do not widen those overrides. Do not add another one without a reason written next to it in this file.
+- `test/helpers/E2eProcess.ts` may import `node:child_process` to spawn `letta` and the scripted model.
+- `test/helpers/McpHttpServer.ts` may import `node:http` to serve the MCP fixture. `HttpClient` does not serve.
+
+Do not add another allowed module without a reason written next to it in this file.
 
 ## Commands
 
 ```sh
 npm install        # also patches tsc with the Effect Language Service (effect-tsgo patch)
 npm run check      # tsc (TypeScript 7) with Effect diagnostics
-npm run lint       # oxlint (Effect rules, warnings are errors) + dprint + suppression check
+npm run lint       # oxlint (Effect rules, warnings are errors) + dprint + the Effect gate
 npm run lint-fix   # oxlint --fix + dprint fmt
 npm test           # vitest
 npm run verify     # check, lint, test, and build

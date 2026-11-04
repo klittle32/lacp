@@ -1,6 +1,7 @@
 // Fails when a suppression comment has no reason, or silences an Effect-native rule inline.
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Console, Effect, FileSystem, Path, Schema } from "effect"
+import { slipProblems } from "./slips.ts"
 import { suppressionProblems } from "./suppressions.ts"
 
 class UnreasonedSuppression extends Schema.TaggedError<UnreasonedSuppression, { readonly brand: unique symbol }>()(
@@ -34,9 +35,17 @@ const program = Effect.gen(function*() {
   const files = yield* walk(root)
   const problems: Array<string> = []
   for (const file of files) {
+    const relative = path.relative(root, file).split(path.sep).join("/")
     const text = yield* fs.readFileString(file)
     for (const problem of suppressionProblems(text)) {
-      problems.push(`${path.relative(root, file)}:${problem.line}: ${problem.message}`)
+      problems.push(`${relative}:${problem.line}: ${problem.message}`)
+    }
+    const fixtureScript = relative.startsWith("test/fixtures/") && !relative.endsWith(".ts") &&
+      !relative.endsWith(".tsx")
+    if (!fixtureScript) {
+      for (const problem of slipProblems(text, relative)) {
+        problems.push(`${relative}:${problem.line}: ${problem.message}`)
+      }
     }
   }
   if (problems.length > 0) {

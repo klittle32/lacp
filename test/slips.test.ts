@@ -27,7 +27,23 @@ describe("banned Effect slips", () => {
       export const Boom = class extends Error {}
     `
     const messages = problemsFor(source).map((problem) => problem.message).join("\n")
-    for (const needle of ["JSON.parse", "JSON.stringify", "console", "Math.random", "Date.now", "process.env", "setTimeout", "crypto.randomUUID", "fetch", "Promise", "Date", "TypeError", "Error"]) {
+    for (
+      const needle of [
+        "JSON.parse",
+        "JSON.stringify",
+        "console",
+        "Math.random",
+        "Date.now",
+        "process.env",
+        "setTimeout",
+        "crypto.randomUUID",
+        "fetch",
+        "Promise",
+        "Date",
+        "TypeError",
+        "Error"
+      ]
+    ) {
       assert.include(messages, needle)
     }
   })
@@ -78,7 +94,10 @@ describe("banned Effect slips", () => {
       1
     )
     assert.deepStrictEqual(
-      problemsFor("import { createServer } from \"node:http\"\nimport type { AddressInfo } from \"node:net\"\n", "test/helpers/McpHttpServer.ts"),
+      problemsFor(
+        "import { createServer } from \"node:http\"\nimport type { AddressInfo } from \"node:net\"\n",
+        "test/helpers/McpHttpServer.ts"
+      ),
       []
     )
     assert.strictEqual(

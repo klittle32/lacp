@@ -74,7 +74,7 @@
   },
   "ignorePatterns": [
     "dist",
-    "test/fixtures",
+    "test/fixtures/**/*.mjs",
     "node_modules"
   ],
   "overrides": [

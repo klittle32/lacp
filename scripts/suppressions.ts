@@ -67,80 +67,155 @@ interface CommentSpan {
   readonly text: string
 }
 
-/** Comment texts, with strings and template literals left alone. */
+const REGEX_KEYWORDS = new Set([
+  "return",
+  "throw",
+  "case",
+  "void",
+  "typeof",
+  "delete",
+  "await",
+  "yield",
+  "else",
+  "do",
+  "in",
+  "of",
+  "instanceof"
+])
+
+/** Comment texts. A slash after `=` is a regex, and `${}` returns to code. */
 export const commentSpans = (source: string): Array<CommentSpan> => {
   const found: Array<CommentSpan> = []
+  let index = 0
   let line = 1
-  let state: "code" | "line" | "block" | "single" | "double" | "template" = "code"
-  let buffer = ""
-  let bufferLine = 1
-  let i = 0
+  let canRegex = true
 
-  const push = () => {
-    found.push({ line: bufferLine, text: buffer })
-    buffer = ""
-  }
-
-  while (i < source.length) {
-    const char = source[i]!
-    const next = source[i + 1]
-    if (char === "\n") line++
-
-    if (state === "code") {
+  const scanCode = (stopOnBrace: boolean) => {
+    let depth = 0
+    while (index < source.length) {
+      const char = source[index]!
+      const next = source[index + 1]
+      if (stopOnBrace && char === "}" && depth === 0) {
+        index++
+        return
+      }
+      if (char === "{") {
+        depth++
+        canRegex = true
+        index++
+        continue
+      }
+      if (char === "}") {
+        depth = Math.max(0, depth - 1)
+        canRegex = false
+        index++
+        continue
+      }
+      if (char === "\n") {
+        line++
+        canRegex = true
+        index++
+        continue
+      }
+      if (char === " " || char === "\t" || char === "\r") {
+        index++
+        continue
+      }
       if (char === "/" && next === "/") {
-        state = "line"
-        buffer = ""
-        bufferLine = line
-        i += 2
+        const startLine = line
+        index += 2
+        let text = ""
+        while (index < source.length && source[index] !== "\n") text += source[index++]
+        found.push({ line: startLine, text })
+        canRegex = true
         continue
       }
       if (char === "/" && next === "*") {
-        state = "block"
-        buffer = ""
-        bufferLine = line
-        i += 2
+        const startLine = line
+        index += 2
+        let text = ""
+        while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) {
+          if (source[index] === "\n") line++
+          text += source[index++]
+        }
+        index = Math.min(source.length, index + 2)
+        found.push({ line: startLine, text })
+        canRegex = true
         continue
       }
-      if (char === "'") state = "single"
-      else if (char === "\"") state = "double"
-      else if (char === "`") state = "template"
-      i++
-      continue
-    }
-
-    if (state === "line") {
-      if (char === "\n") {
-        push()
-        state = "code"
-      } else buffer += char
-      i++
-      continue
-    }
-
-    if (state === "block") {
-      if (char === "*" && next === "/") {
-        push()
-        state = "code"
-        i += 2
+      if (canRegex && char === "/") {
+        index++
+        while (index < source.length && source[index] !== "\n") {
+          if (source[index] === "\\") {
+            index += 2
+            continue
+          }
+          if (source[index] === "[") {
+            index++
+            while (index < source.length && source[index] !== "]" && source[index] !== "\n") {
+              index += source[index] === "\\" ? 2 : 1
+            }
+            continue
+          }
+          if (source[index] === "/") {
+            index++
+            break
+          }
+          index++
+        }
+        while (index < source.length && /[a-z]/i.test(source[index]!)) index++
+        canRegex = false
         continue
       }
-      buffer += char
-      i++
-      continue
+      if (char === "\"" || char === "'") {
+        const quote = char
+        index++
+        while (index < source.length && source[index] !== quote && source[index] !== "\n") {
+          index += source[index] === "\\" ? 2 : 1
+        }
+        if (source[index] === quote) index++
+        canRegex = false
+        continue
+      }
+      if (char === "`") {
+        index++
+        while (index < source.length) {
+          if (source[index] === "\\") {
+            index += 2
+            continue
+          }
+          if (source[index] === "`") {
+            index++
+            break
+          }
+          if (source[index] === "$" && source[index + 1] === "{") {
+            index += 2
+            scanCode(true)
+            continue
+          }
+          if (source[index] === "\n") line++
+          index++
+        }
+        canRegex = false
+        continue
+      }
+      if (/[A-Za-z_$]/.test(char)) {
+        let word = ""
+        while (index < source.length && /[A-Za-z0-9_$]/.test(source[index]!)) word += source[index++]
+        canRegex = REGEX_KEYWORDS.has(word)
+        continue
+      }
+      if (/[0-9]/.test(char)) {
+        while (index < source.length && /[0-9A-Za-z_.]/.test(source[index]!)) index++
+        canRegex = false
+        continue
+      }
+      canRegex = "([{:;,=!?+-~*%&|^<>".includes(char)
+      index++
     }
-
-    if (char === "\\") {
-      i += 2
-      continue
-    }
-    if (
-      (state === "single" && char === "'") || (state === "double" && char === "\"") ||
-      (state === "template" && char === "`")
-    ) state = "code"
-    i++
   }
 
-  if (state === "line" && buffer !== "") push()
+  scanCode(false)
   return found
 }
 
@@ -161,8 +236,10 @@ export const suppressionProblems = (source: string): Array<SuppressionProblem> =
       const dash = typescriptDirective ? -1 : body.indexOf("--")
       const rules = dash === -1 ? body : body.slice(0, dash)
       const reason = typescriptDirective ? body.replace(/^[\s:]+/, "") : dash === -1 ? "" : body.slice(dash + 2)
+      const namedRules = rules.trim()
+      const blanket = namedRules === "" || namedRules === "*" || /(^|[\s,])\*(?::[A-Za-z]+)?\b/.test(namedRules)
 
-      if (!typescriptDirective && mentionsGuarded(rules)) {
+      if (!typescriptDirective && (blanket || mentionsGuarded(rules))) {
         problems.push({
           line: comment.line,
           message:
