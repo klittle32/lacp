@@ -4,12 +4,9 @@
  * agent's own requests (permissions) with a configurable policy.
  */
 import { NodePath, NodeServices } from "@effect/platform-node"
-import { type Cause, Context, Deferred, Effect, Layer, Option, PubSub, Queue, Ref, Schema } from "effect"
+import { type Cause, Context, Deferred, Effect, FileSystem, Layer, Option, PubSub, Queue, Ref, Schema } from "effect"
 import * as SecureRandom from "effect/crypto/SecureRandom"
 import { FetchHttpClient } from "effect/http"
-import { mkdtempSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { AcpServer } from "../../src/agent/AcpServer.ts"
 import { Agent } from "../../src/agent/Agent.ts"
 import { AgentResolver } from "../../src/agent/AgentResolver.ts"
@@ -191,7 +188,10 @@ export const initializeV1 = {
 }
 
 /** A new empty directory. */
-export const projectDir = () => mkdtempSync(join(tmpdir(), "lacp-project-"))
+export const projectDir = Effect.flatMap(
+  FileSystem.FileSystem,
+  (fs) => fs.makeTempDirectory({ prefix: "lacp-project-" })
+).pipe(Effect.provide(NodeServices.layer))
 
 /** T3 Code's hybrid request: v2 fields plus v1 fields. */
 export const initializeHybrid = {

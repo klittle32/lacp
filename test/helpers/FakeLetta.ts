@@ -306,7 +306,9 @@ export const make = Effect.gen(function*() {
   const cli = (args: ReadonlyArray<string>) =>
     Ref.update(cliCalls, (all) => [...all, args]).pipe(
       Effect.andThen(Effect.suspend(() => {
-        if (args[0] === "model" && args[1] === "list") return Effect.succeed(JSON.stringify(MODEL_LIST))
+        if (args[0] === "model" && args[1] === "list") {
+          return Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))(MODEL_LIST).pipe(Effect.orDie)
+        }
         const flag = (name: string) => args[args.indexOf(name) + 1]
         if (args[0] === "model" && args[1] === "set") {
           const conversation = flag("--conversation") ?? ""

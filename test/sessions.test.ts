@@ -6,10 +6,8 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
-import { Context, Effect, FileSystem, Layer, Option, Ref } from "effect"
+import { Context, Effect, FileSystem, Layer, Option, Path, Ref, Schema } from "effect"
 import * as SecureRandom from "effect/crypto/SecureRandom"
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
 import { SessionIds } from "../src/agent/SessionIds.ts"
 import { Host } from "../src/Host.ts"
 import { ErrorCode } from "../src/jsonrpc/JsonRpc.ts"
@@ -21,7 +19,7 @@ describe("lazy conversations", () => {
   it.live("opens a session without creating anything in Letta, and creates it with the first prompt", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const cwd = projectDir()
+      const cwd = yield* projectDir
       const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
       // T3 Code's provider check: open a session, read its settings, close it.
@@ -143,6 +141,7 @@ describe("lazy conversations", () => {
 describe("sessions use existing agents only", () => {
   const missing = (agentId: string) => ({ success: false, agent: null, error: `Agent ${agentId} not found` })
   const NOT_FOUND = -32002
+  const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))
 
   /** A server on a host whose Letta settings are `settings`, with no agent configured unless `agentId` says so. */
   const startOnHost = (
@@ -150,10 +149,15 @@ describe("sessions use existing agents only", () => {
     options: { readonly agentId?: string; readonly lastAgent?: string } = {}
   ) =>
     Effect.gen(function*() {
-      const home = projectDir()
+      const home = yield* projectDir
       if (options.lastAgent !== undefined) {
-        mkdirSync(join(home, ".letta"))
-        writeFileSync(join(home, ".letta", "settings.json"), JSON.stringify({ lastAgent: options.lastAgent }))
+        const fs = yield* FileSystem.FileSystem
+        const path = yield* Path.Path
+        yield* fs.makeDirectory(path.join(home, ".letta"))
+        yield* fs.writeFileString(
+          path.join(home, ".letta", "settings.json"),
+          yield* encodeJson({ lastAgent: options.lastAgent })
+        )
       }
       const client = yield* startWith(LettaAppServer.layerConnection(fake.connection, fake.cli), {
         config: { agentId: Option.fromUndefinedOr(options.agentId) },
@@ -161,25 +165,26 @@ describe("sessions use existing agents only", () => {
       })
       yield* client.request("initialize", initializeHybrid)
       return client
-    })
+    }).pipe(Effect.provide(NodeServices.layer))
 
   it.live("refuses a new session when there is no agent to use, and never asks Letta to create one", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
-      const cwd = projectDir()
+      const cwd = yield* projectDir
       const client = yield* startOnHost(fake)
       const created = yield* client.request("session/new", { cwd })
       assert.strictEqual(created.error?.code, NOT_FOUND)
       assert.include(created.error?.message, "LETTA_AGENT_ID")
       assert.deepStrictEqual((yield* Ref.get(fake.commands)).map((c) => c.type).filter((t) => t !== "list_models"), [])
-      assert.deepStrictEqual(readdirSync(cwd), [])
-    }))
+      const fs = yield* FileSystem.FileSystem
+      assert.deepStrictEqual(yield* fs.readDirectory(cwd), [])
+    }).pipe(Effect.provide(NodeServices.layer)))
 
   it.live("uses the host's last agent, creating only a conversation with the first prompt", () =>
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const client = yield* startOnHost(fake, { lastAgent: "agent-host" })
-      const sessionId = (yield* client.request("session/new", { cwd: projectDir() })).result.sessionId as string
+      const sessionId = (yield* client.request("session/new", { cwd: yield* projectDir })).result.sessionId as string
       yield* client.request("session/prompt", { sessionId, prompt: text("hello") })
       const [runtimeStart] = yield* sent(fake, "runtime_start")
       assert.strictEqual(runtimeStart.agent_id, "agent-host")
@@ -195,7 +200,7 @@ describe("sessions use existing agents only", () => {
           ? missing(command.agent_id)
           : { success: true, agent: { id: command.agent_id } })
       const client = yield* startOnHost(fake, { agentId: "agent-typo", lastAgent: "agent-host" })
-      const created = yield* client.request("session/new", { cwd: projectDir() })
+      const created = yield* client.request("session/new", { cwd: yield* projectDir })
       assert.strictEqual(created.error?.code, NOT_FOUND)
       assert.include(created.error?.message, "agent-typo")
       assert.include(created.error?.message, "LETTA_AGENT_ID")
@@ -208,10 +213,10 @@ describe("sessions use existing agents only", () => {
       const fake = yield* Fake.make
       const client = yield* startOnHost(fake, { agentId: "agent-mine" })
       yield* fake.on("agent_retrieve", () => ({ success: false, agent: null, error: "401 Unauthorized" }))
-      const unauthorized = yield* client.request("session/new", { cwd: projectDir() })
+      const unauthorized = yield* client.request("session/new", { cwd: yield* projectDir })
       assert.strictEqual(unauthorized.error?.code, ErrorCode.AuthRequired)
       yield* fake.on("agent_retrieve", () => ({ success: false, agent: null, error: "fetch failed: ECONNREFUSED" }))
-      const unreachable = yield* client.request("session/new", { cwd: projectDir() })
+      const unreachable = yield* client.request("session/new", { cwd: yield* projectDir })
       assert.strictEqual(unreachable.error?.code, ErrorCode.InternalError)
       assert.include(unreachable.error?.message, "ECONNREFUSED")
     }))
@@ -221,7 +226,7 @@ describe("sessions use existing agents only", () => {
       const fake = yield* Fake.make
       yield* fake.on("agent_retrieve", () => ({ success: false, agent: null, error: "fetch failed: ECONNREFUSED" }))
       const client = yield* startOnHost(fake, { lastAgent: "agent-host" })
-      const created = yield* client.request("session/new", { cwd: projectDir() })
+      const created = yield* client.request("session/new", { cwd: yield* projectDir })
       assert.strictEqual(created.error?.code, ErrorCode.InternalError)
     }))
 

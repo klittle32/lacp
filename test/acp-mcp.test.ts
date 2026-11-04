@@ -1,13 +1,19 @@
+import { NodePath } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
-import { Effect, Ref } from "effect"
-import { dirname } from "node:path"
-import { fileURLToPath } from "node:url"
+import { Effect, Path, Ref, Schema } from "effect"
 import { initializeHybrid, initializeV1, start } from "./helpers/AcpClient.ts"
 import * as Fake from "./helpers/FakeLetta.ts"
 
-const fixture = fileURLToPath(new URL("./fixtures/mcp-server.mjs", import.meta.url))
+const RootNames = Schema.fromJsonString(Schema.Array(Schema.Struct({ name: Schema.String })))
+
 // stdio servers start in the session's cwd, so it has to exist.
-const cwd = dirname(fixture)
+const { cwd, fixture } = Effect.runSync(
+  Effect.gen(function*() {
+    const path = yield* Path.Path
+    const file = yield* path.fromFileUrl(new URL("./fixtures/mcp-server.mjs", import.meta.url))
+    return { fixture: file, cwd: path.dirname(file) }
+  }).pipe(Effect.provide(NodePath.layer))
+)
 
 const v2Server = { type: "stdio", name: "fixture", command: process.execPath, args: [fixture], env: [] }
 const v1Server = { name: "fixture", command: process.execPath, args: [fixture], env: [] }
@@ -72,7 +78,8 @@ describe("client MCP servers", () => {
       // The server's roots are the session's working directory.
       yield* fake.emit(callRequest(conversation, "2", "mcp__fixture__roots", {}))
       const roots = (yield* fake.waitFor(isResponse("2"))) as any
-      assert.strictEqual(JSON.parse(roots.result.content[0].text)[0].name, "fixtures")
+      const parsed = yield* Schema.decodeUnknownEffect(RootNames)(roots.result.content[0].text)
+      assert.strictEqual(parsed[0]?.name, "fixtures")
     }))
 
   it.live("re-registers tools when a server's tool list changes", () =>

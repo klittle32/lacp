@@ -8,39 +8,25 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
-import { Effect, FileSystem, Layer, Option, Path, Predicate, Schedule } from "effect"
-import { spawn, spawnSync } from "node:child_process"
+import { Config, Effect, FileSystem, Layer, Option, Path, Predicate, Schedule, Schema } from "effect"
 import { fileURLToPath } from "node:url"
 import type { LettaRuntime } from "../src/Config.ts"
 import { layerWebSocket, LettaAppServer } from "../src/letta/AppServer.ts"
 import { LettaExecutable } from "../src/letta/Executable.ts"
 import { allowOnce, initializeHybrid, initializeV1, startWith } from "./helpers/AcpClient.ts"
+import { type Backend, bunAvailable, createAgent, serveScriptedModel } from "./helpers/E2eProcess.ts"
 
 const mcpFixture = fileURLToPath(new URL("./fixtures/mcp-server.mjs", import.meta.url))
 const scriptedModel = fileURLToPath(new URL("./fixtures/scripted-model.mjs", import.meta.url))
 
-// oxlint-disable-next-line effecttsgo/process-env -- test-only opt-in switch
-const letta = process.env["LACP_E2E_LETTA"]
-const hasBun = spawnSync("bun", ["--version"]).status === 0
+const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))
+
+/** Opt-in switch, read before the suite is registered. */
+const letta = Option.getOrUndefined(Effect.runSync(Config.option(Config.String("LACP_E2E_LETTA"))))
 
 const realLetta = LettaAppServer.layer.pipe(Layer.provide(LettaExecutable.layer), Layer.provide(layerWebSocket))
 
 // The v2 cases anchor on each prompt's echoed `user_message`, so they turn the echo on.
-/** Serves the scripted model (test/fixtures/scripted-model.mjs) and returns its base URL. */
-const serveScriptedModel = Effect.acquireRelease(
-  Effect.callback<{ readonly url: string; readonly kill: () => void }>((resume) => {
-    const child = spawn(process.execPath, [scriptedModel], { stdio: ["ignore", "pipe", "inherit"] })
-    child.stdout.once(
-      "data",
-      (port) => resume(Effect.succeed({ url: `http://127.0.0.1:${String(port).trim()}/v1`, kill: () => child.kill() }))
-    )
-  }),
-  (model) => Effect.sync(model.kill)
-).pipe(Effect.map((model) => model.url))
-
-/** Letta's offline deterministic backend, or a model endpoint (an LM Studio base URL) on the local backend. */
-type Backend = { readonly _tag: "Deterministic" } | { readonly _tag: "Model"; readonly lmStudioUrl: string }
-
 /** A scoped temporary directory. Removal retries: on Windows a just-killed Letta Code can hold it for a moment. */
 const tempDirectory = (prefix: string) =>
   Effect.gen(function*() {
@@ -54,21 +40,6 @@ const tempDirectory = (prefix: string) =>
         )
     )
   })
-
-/** Makes an agent with `letta` itself, as a user would: lacp never creates them. */
-const createAgent = (env: Record<string, string>, cwd: string, backend: Backend) => {
-  const made = spawnSync(letta ?? "letta", [
-    "--backend",
-    "local",
-    "agents",
-    "create",
-    "--name",
-    "lacp-e2e",
-    ...(backend._tag === "Model" ? ["--model", "lmstudio/mock-model"] : [])
-  ], { cwd, env, encoding: "utf8" })
-  assert.strictEqual(made.status, 0, made.stderr)
-  return (JSON.parse(made.stdout) as { readonly id: string }).id
-}
 
 /**
  * The server on a fresh host. The agent is one made for it and configured, or
@@ -85,8 +56,7 @@ const startReal = (
     const home = yield* tempDirectory("lacp-e2e-home-")
     const cwd = yield* tempDirectory("lacp-e2e-project-")
     const env = {
-      // oxlint-disable-next-line effecttsgo/process-env -- the child needs the real PATH
-      PATH: process.env["PATH"] ?? "",
+      PATH: yield* Config.String("PATH").pipe(Config.withDefault("")),
       HOME: home,
       DISABLE_AUTOUPDATER: "1",
       LETTA_CODE_TELEM: "0",
@@ -96,10 +66,13 @@ const startReal = (
         ? { LMSTUDIO_BASE_URL: backend.lmStudioUrl }
         : { LETTA_LOCAL_BACKEND_EXECUTOR: "deterministic-reflection" })
     }
-    const made = agent === "configured" || agent === "discovered" ? createAgent(env, cwd, backend) : undefined
+    const made = agent === "configured" || agent === "discovered" ? createAgent(letta, env, cwd, backend) : undefined
     if (agent === "discovered") {
       yield* fs.makeDirectory(path.join(cwd, ".letta"), { recursive: true })
-      yield* fs.writeFileString(path.join(cwd, ".letta", "settings.local.json"), JSON.stringify({ lastAgent: made }))
+      yield* fs.writeFileString(
+        path.join(cwd, ".letta", "settings.local.json"),
+        yield* encodeJson({ lastAgent: made })
+      )
     }
     const agentId = agent === "configured" ?
       Option.fromUndefinedOr(made)
@@ -200,7 +173,7 @@ describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
       )
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), 180_000)
 
-  it.live.skipIf(!hasBun)("runs Letta Code under Bun with LACP_LETTA_RUNTIME=bun", () =>
+  it.live.skipIf(!bunAvailable)("runs Letta Code under Bun with LACP_LETTA_RUNTIME=bun", () =>
     Effect.gen(function*() {
       const { client, cwd } = yield* startReal("bun")
       yield* client.request("initialize", initializeV1)
@@ -216,7 +189,7 @@ describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
     "ACP v2: a turn that starts a background subagent ends after the subagent's report",
     () =>
       Effect.gen(function*() {
-        const lmStudioUrl = yield* serveScriptedModel
+        const lmStudioUrl = yield* serveScriptedModel(scriptedModel)
         const { client, cwd } = yield* startReal("node", { _tag: "Model", lmStudioUrl })
         yield* client.request("initialize", initializeHybrid)
         const sessionId = (yield* client.request("session/new", { cwd })).result.sessionId as string

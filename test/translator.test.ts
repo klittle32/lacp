@@ -1,12 +1,14 @@
 import { NodePath } from "@effect/platform-node"
 import { assert, describe, expect, it } from "@effect/vitest"
-import { Effect, Option, Path } from "effect"
+import { Effect, Option, Path, Schema } from "effect"
 import * as Translator from "../src/letta/Translator.ts"
 
 const make = Effect.gen(function*() {
   const path = yield* Path.Path
   return Translator.make({ cwd: "/work", path, contextWindow: () => Option.some(100_000) })
 }).pipe(Effect.provide(NodePath.layerPosix))
+
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown))
 
 const events = (items: ReadonlyArray<Translator.TranslatedEvent>) =>
   items.flatMap((item) => (item._tag === "Event" ? [item.event] : []))
@@ -115,7 +117,7 @@ describe("Translator", () => {
         t.delta({
           message_type: "tool_call_message",
           id,
-          tool_call: { tool_call_id: id, name, arguments: JSON.stringify(args) }
+          tool_call: { tool_call_id: id, name, arguments: encodeJson(args) }
         })
       const ret = (id: string, output: string) =>
         events(

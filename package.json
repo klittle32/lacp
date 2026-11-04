@@ -33,23 +33,23 @@
     "dev": "node src/main.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "oxlint && dprint check",
+    "lint": "oxlint && dprint check && node scripts/check-suppressions.ts",
     "lint-fix": "oxlint --fix && dprint fmt",
     "format": "dprint fmt",
     "diagnostics": "effect-tsgo diagnostics --project tsconfig.json",
-    "verify": "npm run check && npm run lint && npm test",
+    "verify": "npm run check && npm run lint && npm test && npm run build",
     "smoke:t3": "node scripts/t3-smoke.ts"
   },
   "dependencies": {
-    "@effect/platform-node": "4.1.1",
-    "effect": "4.1.1"
+    "@effect/platform-node": "4.1.2",
+    "effect": "4.1.2"
   },
   "devDependencies": {
     "@dprint/json": "0.25.2",
     "@dprint/markdown": "0.28.2",
     "@dprint/typescript": "0.96.1",
-    "@effect/tsgo": "0.63.0",
-    "@effect/vitest": "4.1.1",
+    "@effect/tsgo": "0.64.1",
+    "@effect/vitest": "4.1.2",
     "@types/node": "26.6.6",
     "dprint": "0.64.3",
     "oxlint": "1.90.0",

@@ -1,6 +1,6 @@
 import { NodeServices } from "@effect/platform-node"
 import { assert, describe, it } from "@effect/vitest"
-import { Context, Effect, FileSystem, Layer, Option, Path, Ref } from "effect"
+import { Context, Effect, FileSystem, Layer, Option, Path, Ref, Schema } from "effect"
 import { AgentResolver } from "../src/agent/AgentResolver.ts"
 import { LacpConfig, type LacpConfigShape } from "../src/Config.ts"
 import { Host } from "../src/Host.ts"
@@ -20,12 +20,14 @@ const setup = (config: Partial<LacpConfigShape> = {}) =>
     return { resolver: Context.get(context, AgentResolver), home, cwd }
   })
 
+const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))
+
 const writeSettings = (dir: string, file: string, settings: unknown) =>
   Effect.gen(function*() {
     const fs = yield* FileSystem.FileSystem
     const path = yield* Path.Path
     yield* fs.makeDirectory(path.join(dir, ".letta"), { recursive: true })
-    yield* fs.writeFileString(path.join(dir, ".letta", file), JSON.stringify(settings))
+    yield* fs.writeFileString(path.join(dir, ".letta", file), yield* encodeJson(settings))
   })
 
 /** How Letta Code answers `agent_retrieve` for an agent it does not have. */
