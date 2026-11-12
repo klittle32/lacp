@@ -1,7 +1,8 @@
 // A scripted OpenAI-compatible model for the end-to-end tests, served on a free
 // port (printed on stdout). Letta Code reaches it as an LM Studio endpoint.
 //
-// - "SPAWN_WORKER" makes the agent start a background subagent with the Agent tool.
+// - "SPAWN_WORKER" makes the agent start a background subagent with the Agent tool. It sends no
+//   subagent_type: Letta Code 0.34.54 rejects "general-purpose" and uses its default harness when omitted.
 // - The subagent ("WORKER_TASK") answers after SCRIPTED_MODEL_WORKER_MS (default 1500).
 // - The follow-up turn Letta runs with the subagent's <task-notification> reports.
 // - "FAIL_ONCE" fails the first request for it with HTTP 503 (Letta retries), then answers.
@@ -45,8 +46,7 @@ const reply = async (body) => {
     const tool = (body.tools ?? []).some((t) => t.function?.name === "Agent") ? "Agent" : "Task"
     const args = {
       description: "List directory",
-      prompt: "WORKER_TASK list the directory",
-      subagent_type: "general-purpose"
+      prompt: "WORKER_TASK list the directory"
     }
     return [{
       tool_calls: [{
