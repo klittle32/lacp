@@ -216,9 +216,8 @@ describe("ACP v1 sessions", () => {
           }]
         }
       })
-      const answer = (yield* fake.waitFor((c: any) =>
-        c.type === "input" && c.payload.kind === "approval_response"
-      )) as any
+      const answer =
+        (yield* fake.waitFor((c: any) => c.type === "input" && c.payload.kind === "approval_response")) as any
       assert.deepStrictEqual(answer.payload, {
         kind: "approval_response",
         request_id: "perm-call-2",
@@ -266,9 +265,8 @@ describe("ACP v1 sessions", () => {
       for (const [id, optionId] of [["c-always", "always:s1"], ["c-reject", "reject"]] as const) {
         yield* client.setPermissionPolicy(() => ({ outcome: { outcome: "selected", optionId } }))
         yield* fake.emit(permission(id))
-        const answer = (yield* fake.waitFor((c: any) =>
-          c.type === "input" && c.payload.request_id === `perm-${id}`
-        )) as any
+        const answer =
+          (yield* fake.waitFor((c: any) => c.type === "input" && c.payload.request_id === `perm-${id}`)) as any
         decisions.push(answer.payload.decision)
       }
       assert.deepStrictEqual(decisions, [

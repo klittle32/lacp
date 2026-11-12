@@ -39,9 +39,10 @@ describe("Models.catalog", () => {
   })
 
   it("takes the levels `letta model list` reports, for models without presets too", () => {
-    const [byok] = Models.catalog([entry("my-openai/gpt-5", "my-openai/gpt-5")], [
-      { id: "my-openai/gpt-5", handle: "my-openai/gpt-5", reasoning_levels: ["high", "low", "minimal", "bogus"] }
-    ])
+    const [byok] = Models.catalog(
+      [entry("my-openai/gpt-5", "my-openai/gpt-5")],
+      [{ id: "my-openai/gpt-5", handle: "my-openai/gpt-5", reasoning_levels: ["high", "low", "minimal", "bogus"] }]
+    )
     assert.deepStrictEqual(byok?.levels, ["minimal", "low", "high"])
     assert.deepStrictEqual(byok?.presets, [])
   })
@@ -55,9 +56,10 @@ describe("Models.catalog", () => {
       context_window: 500_000,
       provider_type: "xai"
     })
-    const choices = Models.catalog([grok("low"), grok("medium"), grok("high"), own], [
-      { id: "lc-xai/grok-4.7", handle: "lc-xai/grok-4.7", context_window_limit: 500_000, reasoning_levels: [] }
-    ])
+    const choices = Models.catalog(
+      [grok("low"), grok("medium"), grok("high"), own],
+      [{ id: "lc-xai/grok-4.7", handle: "lc-xai/grok-4.7", context_window_limit: 500_000, reasoning_levels: [] }]
+    )
     const byok = choices.find((c) => c.handle === "lc-xai/grok-4.7")
     assert.deepStrictEqual(byok?.levels, ["low", "medium", "high"])
     assert.deepStrictEqual(byok?.presets, [])

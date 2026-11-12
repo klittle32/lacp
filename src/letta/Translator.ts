@@ -11,8 +11,8 @@
  * state needed to produce correct upserts, which keeps it easy to test.
  */
 import { Array as Arr, Match, Option, type Path, Schema, String as Str } from "effect"
-import * as Content from "../acp/Content.ts"
 import type { ToolKind } from "../acp/Content.ts"
+import * as Content from "../acp/Content.ts"
 import type {
   DiffHunk,
   PermissionChoice,

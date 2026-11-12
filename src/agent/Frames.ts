@@ -44,8 +44,8 @@ import * as Translator from "../letta/Translator.ts"
 import type { AcpClient } from "./Client.ts"
 import type { Attachment, Session } from "./Session.ts"
 import { configOptions, decodePermissionMode } from "./Settings.ts"
-import * as Turn from "./Turn.ts"
 import type { TurnResult } from "./Turn.ts"
+import * as Turn from "./Turn.ts"
 
 /** What the handlers need from the agent core's services. */
 export interface Deps {
@@ -437,7 +437,7 @@ export const consume = (
   return PubSub.take(subscription).pipe(
     Effect.flatMap((frame) =>
       (frame.header.runtime?.conversation_id ?? frame.header.conversation_id) ===
-          attachment.runtime.conversation_id
+        attachment.runtime.conversation_id
         ? Option.match(decodeRuntimeFrame(frame.raw), { onNone: () => Effect.void, onSome: handle }).pipe(
           Effect.catchCause((cause) => Effect.logError(`Failed to handle a Letta ${frame.header.type} frame`, cause))
         )

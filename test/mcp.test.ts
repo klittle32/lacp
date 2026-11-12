@@ -147,10 +147,10 @@ describe("McpClient over Streamable HTTP", () => {
 
   it.live("turns HTTP failures into request errors", () =>
     Effect.gen(function*() {
-      const error = yield* connect({ _tag: "Http", name: "down", url: "http://127.0.0.1:9/mcp", headers: {} }, {
-        ...options,
-        timeout: "5 seconds"
-      }).pipe(Effect.flip)
+      const error = yield* connect(
+        { _tag: "Http", name: "down", url: "http://127.0.0.1:9/mcp", headers: {} },
+        { ...options, timeout: "5 seconds" }
+      ).pipe(Effect.flip)
       assert.strictEqual(error._tag, "McpError")
       assert.include(error.message, "initialize failed")
     }).pipe(Effect.scoped, Effect.provide(TestLayer)))

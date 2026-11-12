@@ -375,13 +375,15 @@ export class Settings extends Context.Service<Settings, {
               onSome: (choice) =>
                 applyEffort(settings, target, choice, effort).pipe(
                   Effect.mapError(configFailure(configId, value)),
-                  Effect.andThen(Effect.suspend(() =>
-                    Option.contains(settings.effort, effort) ? Effect.void : Effect.logWarning(
-                      `Asked Letta for ${effort} effort on ${choice.handle}; it reports ${
-                        Option.getOrElse(settings.effort, () => "none recorded")
-                      }`
+                  Effect.andThen(
+                    Effect.suspend(() =>
+                      Option.contains(settings.effort, effort) ? Effect.void : Effect.logWarning(
+                        `Asked Letta for ${effort} effort on ${choice.handle}; it reports ${
+                          Option.getOrElse(settings.effort, () => "none recorded")
+                        }`
+                      )
                     )
-                  ))
+                  )
                 )
             })
         })

@@ -221,10 +221,11 @@ The project uses the toolchain the Effect v4 repository recommends:
 
 | Tool                                                                                       | Purpose                                                                                            |
 | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| [TypeScript 7](https://github.com/microsoft/typescript-go) (`tsc`, the Go-native compiler) | type checking and builds                                                                           |
+| [TypeScript 7](https://github.com/microsoft/typescript-go) (`tsc`, the Go-native compiler) | type checking                                                                                      |
 | [`@effect/tsgo`](https://github.com/Effect-TS/tsgo)                                        | the Effect Language Service for TS 7; `npm install` patches `tsc` so it reports Effect diagnostics |
 | [oxlint](https://oxc.rs) + `oxlint-tsgolint`                                               | linting, with the Effect rule presets shipped in `@effect/tsgo`                                    |
 | [dprint](https://dprint.dev)                                                               | formatting                                                                                         |
+| [Rolldown](https://rolldown.rs)                                                            | bundles the CLI into one dependency-free `dist/main.js`, which starts about 5x faster              |
 | [Vitest](https://vitest.dev) + `@effect/vitest`                                            | tests                                                                                              |
 
 ```sh
@@ -232,7 +233,7 @@ npm install          # also runs `effect-tsgo patch`
 npm run check        # tsc with Effect diagnostics
 npm run lint         # oxlint + dprint check
 npm test             # unit and integration tests
-npm run build        # dist/
+npm run build        # bundle to dist/main.js
 npm run dev -- doctor  # run from source (Node type stripping)
 ```
 

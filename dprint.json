@@ -4,7 +4,7 @@
   "lineWidth": 120,
   "newLineKind": "lf",
   "typescript": {
-    "semiColons": "asi",
+    "semicolons": "asi",
     "quoteStyle": "alwaysDouble",
     "trailingCommas": "never",
     "operatorPosition": "maintain",

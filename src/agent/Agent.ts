@@ -59,8 +59,8 @@ import { type StartedRuntime, startRuntime } from "./Runtime.ts"
 import { type Attachment, makeSession, type Session, targetOf, translatorContext } from "./Session.ts"
 import { SessionIds } from "./SessionIds.ts"
 import { configOptions, DEFAULT_PERMISSION_MODE, initialSettings, Settings } from "./Settings.ts"
-import * as Turn from "./Turn.ts"
 import type { TurnResult } from "./Turn.ts"
+import * as Turn from "./Turn.ts"
 
 // ---------------------------------------------------------------------------
 // Public model

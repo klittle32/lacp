@@ -221,9 +221,11 @@ describe.skipIf(letta === undefined)("end-to-end with Letta Code", () => {
 
   it.live("refuses a configured agent Letta Code does not have, without falling back", () =>
     Effect.gen(function*() {
-      const { client, cwd } = yield* startReal("node", { _tag: "Deterministic" }, {
-        configured: "agent-00000000-0000-4000-8000-000000000000"
-      })
+      const { client, cwd } = yield* startReal(
+        "node",
+        { _tag: "Deterministic" },
+        { configured: "agent-00000000-0000-4000-8000-000000000000" }
+      )
       yield* client.request("initialize", initializeHybrid)
       const created = yield* client.request("session/new", { cwd })
       assert.strictEqual(created.error?.code, -32002)

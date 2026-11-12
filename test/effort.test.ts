@@ -256,8 +256,10 @@ describe("effort", () => {
     Effect.gen(function*() {
       const fake = yield* Fake.make
       const release = yield* Deferred.make<void>()
-      yield* fake.on("list_models", () =>
-        Deferred.await(release).pipe(Effect.as({ success: true, entries: Fake.MODEL_ENTRIES })))
+      yield* fake.on(
+        "list_models",
+        () => Deferred.await(release).pipe(Effect.as({ success: true, entries: Fake.MODEL_ENTRIES }))
+      )
       const client = yield* start(fake)
       yield* client.request("initialize", initializeHybrid)
       const opening = yield* Effect.all([
