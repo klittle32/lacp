@@ -45,7 +45,7 @@
     "@dprint/markdown": "0.29.0",
     "@dprint/typescript": "0.100.0",
     "@effect/platform-node": "4.1.4",
-    "@effect/tsgo": "0.68.1",
+    "@effect/tsgo": "0.70.0",
     "@effect/vitest": "4.1.4",
     "@types/node": "26.6.6",
     "dprint": "0.64.3",
